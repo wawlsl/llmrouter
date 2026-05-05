@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>首页总览 - Responses Gateway</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/layui@2.9.18/dist/css/layui.css" />
+    <link rel="stylesheet" href="/public/style.css" />
+  </head>
+  <body class="admin-layout">
+    <%- include('partials/admin_nav', { activePage, stats, notice }) %>
+
+    <section class="card">
+      <div class="log-head">
+        <h2>运营总览</h2>
+        <p class="muted">最近24小时实时趋势（内存窗口）</p>
+      </div>
+      <div class="dashboard-cards">
+        <article class="metric-card">
+          <p class="metric-label">今日请求</p>
+          <p class="metric-value"><%= Number(dashboard.cards.todayRequests || 0).toLocaleString('zh-CN') %></p>
+        </article>
+        <article class="metric-card">
+          <p class="metric-label">成功率</p>
+          <p class="metric-value"><%= ((dashboard.cards.successRate || 0) * 100).toFixed(2) %>%</p>
+        </article>
+        <article class="metric-card">
+          <p class="metric-label">今日费用</p>
+          <p class="metric-value"><%= dashboard.cards.todayCost %> <%= dashboard.cards.currency %></p>
+        </article>
+        <article class="metric-card">
+          <p class="metric-label">平均延迟</p>
+          <p class="metric-value"><%= Number(dashboard.cards.avgLatencyMs || 0).toLocaleString('zh-CN') %> ms</p>
+        </article>
+        <article class="metric-card">
+          <p class="metric-label">P95延迟</p>
+          <p class="metric-value"><%= Number(dashboard.cards.p95LatencyMs || 0).toLocaleString('zh-CN') %> ms</p>
+        </article>
+        <article class="metric-card">
+          <p class="metric-label">启用账号</p>
+          <p class="metric-value"><%= Number(dashboard.cards.activeAccountCount || 0).toLocaleString('zh-CN') %></p>
+        </article>
+        <article class="metric-card">
+          <p class="metric-label">启用分组</p>
+          <p class="metric-value"><%= Number(dashboard.cards.groupCount || 0).toLocaleString('zh-CN') %></p>
+        </article>
+        <article class="metric-card">
+          <p class="metric-label">启用Key</p>
+          <p class="metric-value"><%= Number(dashboard.cards.accessKeyCount || 0).toLocaleString('zh-CN') %></p>
+        </article>
+      </div>
+    </section>
+
+    <section class="dashboard-grid">
+      <article class="card span-2">
+        <h3>请求趋势（24h）</h3>
+        <div id="chartRequests" class="chart-box"></div>
+      </article>
+      <article class="card">
+        <h3>Provider占比</h3>
+        <div id="chartProviders" class="chart-box"></div>
+      </article>
+      <article class="card span-2">
+        <h3>Token趋势（输入/输出/缓存）</h3>
+        <div id="chartTokens" class="chart-box"></div>
+      </article>
+      <article class="card">
+        <h3>状态码分布</h3>
+        <div id="chartStatus" class="chart-box"></div>
+      </article>
+      <article class="card span-3">
+        <h3>Top模型 Token 消耗</h3>
+        <div id="chartModels" class="chart-box"></div>
+      </article>
+    </section>
+
+    <section class="card">
+      <h3>Top模型明细</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>模型</th>
+              <th>请求数</th>
+              <th>Token</th>
+              <th>费用</th>
+            </tr>
+          </thead>
+          <tbody>
+            <% (dashboard.topModels || []).forEach((row) => { %>
+              <tr>
+                <td><code><%= row.model %></code></td>
+                <td><%= Number(row.requests || 0).toLocaleString('zh-CN') %></td>
+                <td><%= Number(row.tokens || 0).toLocaleString('zh-CN') %></td>
+                <td><%= row.cost %> <%= dashboard.cards.currency %></td>
+              </tr>
+            <% }) %>
+            <% if (!dashboard.topModels || dashboard.topModels.length === 0) { %>
+              <tr><td colspan="4" class="muted">暂无数据（请先产生请求）</td></tr>
+            <% } %>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+    <script>
+      (() => {
+        const dashboard = <%- JSON.stringify(dashboard || {}) %>;
+        if (!window.echarts) {
+          return;
+        }
+        const palette = ['#16baaa', '#3b82f6', '#8b5cf6', '#f59e0b', '#f43f5e', '#10b981', '#6366f1'];
+        const textStyle = { color: '#374151' };
+        const grid = { left: 40, right: 20, top: 36, bottom: 36, containLabel: true };
+
+        const elRequests = document.getElementById('chartRequests');
+        const elProviders = document.getElementById('chartProviders');
+        const elTokens = document.getElementById('chartTokens');
+        const elStatus = document.getElementById('chartStatus');
+        const elModels = document.getElementById('chartModels');
+        const charts = [];
+
+        const createChart = (el) => {
+          if (!el) return null;
+          const chart = echarts.init(el);
+          charts.push(chart);
+          return chart;
+        };
+
+        const requestChart = createChart(elRequests);
+        if (requestChart) {
+          requestChart.setOption({
+            color: palette,
+            tooltip: { trigger: 'axis' },
+            grid,
+            xAxis: {
+              type: 'category',
+              boundaryGap: false,
+              data: dashboard.charts?.hourLabels || [],
+              axisLabel: textStyle
+            },
+            yAxis: {
+              type: 'value',
+              axisLabel: textStyle
+            },
+            series: [{
+              name: '请求',
+              type: 'line',
+              smooth: true,
+              symbol: 'circle',
+              symbolSize: 6,
+              areaStyle: { opacity: 0.16 },
+              lineStyle: { width: 2 },
+              data: dashboard.charts?.requestSeries || []
+            }]
+          });
+        }
+
+        const tokenChart = createChart(elTokens);
+        if (tokenChart) {
+          tokenChart.setOption({
+            color: palette,
+            tooltip: { trigger: 'axis' },
+            legend: {
+              data: ['输入', '输出', '缓存'],
+              textStyle
+            },
+            grid,
+            xAxis: {
+              type: 'category',
+              data: dashboard.charts?.hourLabels || [],
+              axisLabel: textStyle
+            },
+            yAxis: { type: 'value', axisLabel: textStyle },
+            series: [
+              {
+                name: '输入',
+                type: 'line',
+                smooth: true,
+                data: dashboard.charts?.inputTokenSeries || []
+              },
+              {
+                name: '输出',
+                type: 'line',
+                smooth: true,
+                data: dashboard.charts?.outputTokenSeries || []
+              },
+              {
+                name: '缓存',
+                type: 'line',
+                smooth: true,
+                data: dashboard.charts?.cachedTokenSeries || []
+              }
+            ]
+          });
+        }
+
+        const providerChart = createChart(elProviders);
+        if (providerChart) {
+          providerChart.setOption({
+            color: palette,
+            tooltip: { trigger: 'item' },
+            legend: {
+              bottom: 0,
+              textStyle
+            },
+            series: [{
+              type: 'pie',
+              radius: ['44%', '72%'],
+              center: ['50%', '45%'],
+              itemStyle: { borderRadius: 8, borderColor: '#fff', borderWidth: 2 },
+              label: { show: true, formatter: '{b}: {d}%' },
+              data: (dashboard.charts?.providerSeries || []).length
+                ? dashboard.charts.providerSeries
+                : [{ name: '暂无数据', value: 1 }]
+            }]
+          });
+        }
+
+        const statusChart = createChart(elStatus);
+        if (statusChart) {
+          statusChart.setOption({
+            color: ['#10b981', '#f59e0b', '#ef4444', '#64748b'],
+            tooltip: { trigger: 'item' },
+            series: [{
+              type: 'pie',
+              radius: ['36%', '66%'],
+              center: ['50%', '45%'],
+              label: { formatter: '{b}\n{d}%' },
+              data: dashboard.charts?.statusSeries || []
+            }]
+          });
+        }
+
+        const modelChart = createChart(elModels);
+        if (modelChart) {
+          modelChart.setOption({
+            color: ['#3b82f6'],
+            tooltip: { trigger: 'axis' },
+            grid,
+            xAxis: {
+              type: 'category',
+              data: dashboard.charts?.modelNames || [],
+              axisLabel: {
+                color: '#374151',
+                interval: 0,
+                rotate: 28
+              }
+            },
+            yAxis: { type: 'value', axisLabel: textStyle },
+            series: [{
+              name: 'Token',
+              type: 'bar',
+              barMaxWidth: 28,
+              data: dashboard.charts?.modelTokenSeries || []
+            }]
+          });
+        }
+
+        window.addEventListener('resize', () => {
+          for (const chart of charts) {
+            chart.resize();
+          }
+        });
+      })();
+    </script>
+  </body>
+</html>

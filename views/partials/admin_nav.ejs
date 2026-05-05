@@ -1,42 +1,148 @@
-<header class="topbar">
-  <h1>Responses Gateway 控制台</h1>
-  <form method="post" action="/admin/logout">
-    <button class="ghost layui-btn layui-btn-primary layui-btn-sm" type="submit">退出</button>
-  </form>
-</header>
+<aside id="adminSidebar" class="layui-side layui-bg-black admin-sidebar">
+  <div class="layui-side-scroll">
+    <div class="sidebar-brand layui-logo">
+      <h1>Responses Gateway</h1>
+      <p>Router Admin</p>
+    </div>
+    <ul class="layui-nav layui-nav-tree sidebar-nav" lay-filter="gateway-side-nav">
+      <li class="layui-nav-item <%= activePage === 'home' ? 'layui-this' : '' %>"><a href="/admin/home">首页总览</a></li>
+      <li class="layui-nav-item <%= activePage === 'accounts' ? 'layui-this' : '' %>"><a href="/admin/accounts">账号池</a></li>
+      <li class="layui-nav-item <%= activePage === 'groups' ? 'layui-this' : '' %>"><a href="/admin/groups">分组池</a></li>
+      <li class="layui-nav-item <%= activePage === 'keys' ? 'layui-this' : '' %>"><a href="/admin/keys">分组Key</a></li>
+      <li class="layui-nav-item <%= activePage === 'cache' ? 'layui-this' : '' %>"><a href="/admin/cache">缓存网关</a></li>
+      <li class="layui-nav-item <%= activePage === 'mappings' ? 'layui-this' : '' %>"><a href="/admin/mappings">模型映射</a></li>
+      <li class="layui-nav-item <%= activePage === 'pricing' ? 'layui-this' : '' %>"><a href="/admin/pricing">模型价格</a></li>
+      <li class="layui-nav-item <%= activePage === 'logs' ? 'layui-this' : '' %>"><a href="/admin/logs">实时日志</a></li>
+      <li class="layui-nav-item <%= activePage === 'settings' ? 'layui-this' : '' %>"><a href="/admin/settings">全局设置</a></li>
+    </ul>
+    <div class="sidebar-footer">
+      <form method="post" action="/admin/logout">
+        <button class="ghost" type="submit">退出登录</button>
+      </form>
+    </div>
+  </div>
+</aside>
+<div id="sidebarMask" class="sidebar-mask"></div>
 
-<nav class="tabs card layui-panel">
-  <a class="tab <%= activePage === 'accounts' ? 'active' : '' %>" href="/admin/accounts">账号池</a>
-  <a class="tab <%= activePage === 'groups' ? 'active' : '' %>" href="/admin/groups">分组池</a>
-  <a class="tab <%= activePage === 'keys' ? 'active' : '' %>" href="/admin/keys">分组Key</a>
-  <a class="tab <%= activePage === 'cache' ? 'active' : '' %>" href="/admin/cache">缓存网关</a>
-  <a class="tab <%= activePage === 'mappings' ? 'active' : '' %>" href="/admin/mappings">模型映射</a>
-  <a class="tab <%= activePage === 'pricing' ? 'active' : '' %>" href="/admin/pricing">模型价格</a>
-  <a class="tab <%= activePage === 'logs' ? 'active' : '' %>" href="/admin/logs">实时日志</a>
-  <a class="tab <%= activePage === 'settings' ? 'active' : '' %>" href="/admin/settings">全局设置</a>
-</nav>
+<header class="layui-header topbar">
+  <div class="layui-card topbar-card">
+    <div class="layui-card-body topbar-body">
+      <div class="topbar-left">
+        <button id="sidebarToggle" type="button" class="ghost sidebar-toggle">菜单</button>
+        <div>
+          <h2>Responses Gateway 控制台</h2>
+          <p class="muted">OpenAI / Claude / PromptCache 统一管理</p>
+        </div>
+      </div>
+      <div class="kpi-pills">
+        <span class="pill">账号 <%= stats.accountCount %></span>
+        <span class="pill">启用 <%= stats.activeCount %></span>
+        <span class="pill">Sticky <%= stats.stickyCount %></span>
+      </div>
+    </div>
+  </div>
+</header>
 
 <% if (notice) { %>
   <div class="notice"><%= notice %></div>
 <% } %>
 
-<section class="grid stats">
-  <article class="card"><h3>账号总数</h3><p><%= stats.accountCount %></p></article>
-  <article class="card"><h3>启用账号</h3><p><%= stats.activeCount %></p></article>
-  <article class="card"><h3>Sticky映射</h3><p><%= stats.stickyCount %></p></article>
+<section class="grid stats quick-stats">
   <article class="card">
     <h3>缓存命中率</h3>
     <p><%= ((stats.cacheHitRate || 0) * 100).toFixed(2) %>%</p>
-    <small class="muted">今日缓存输入Token: <%= Number(stats.todayCachedTokens || 0).toLocaleString('zh-CN') %></small>
+    <small class="muted">缓存输入 <%= Number(stats.todayCachedTokens || 0).toLocaleString('zh-CN') %></small>
   </article>
   <article class="card">
-    <h3>今日输入Token</h3>
+    <h3>今日输入</h3>
     <p><%= Number(stats.todayInputTokens || 0).toLocaleString('zh-CN') %></p>
-    <small class="muted">今日输出Token: <%= Number(stats.todayOutputTokens || 0).toLocaleString('zh-CN') %></small>
+    <small class="muted">输出 <%= Number(stats.todayOutputTokens || 0).toLocaleString('zh-CN') %></small>
   </article>
   <article class="card">
     <h3>今日总Token</h3>
     <p><%= Number(stats.todayTotalTokens || 0).toLocaleString('zh-CN') %></p>
-    <small class="muted">Sticky命中率: <%= ((stats.stickyHitRate || 0) * 100).toFixed(2) %>%</small>
+    <small class="muted">Sticky命中率 <%= ((stats.stickyHitRate || 0) * 100).toFixed(2) %>%</small>
   </article>
 </section>
+
+<script defer src="https://cdn.jsdelivr.net/npm/layui@2.9.18/dist/layui.js"></script>
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    const sidebarToggle = document.getElementById('sidebarToggle');
+    const sidebarMask = document.getElementById('sidebarMask');
+    const sidebarItems = document.querySelectorAll('.sidebar-nav a');
+    const closeSidebar = () => document.body.classList.remove('sidebar-open');
+    const isMobileWidth = () => window.matchMedia('(max-width: 900px)').matches;
+
+    if (sidebarToggle) {
+      sidebarToggle.addEventListener('click', function () {
+        document.body.classList.toggle('sidebar-open');
+      });
+    }
+    if (sidebarMask) {
+      sidebarMask.addEventListener('click', closeSidebar);
+    }
+    sidebarItems.forEach(function (item) {
+      item.addEventListener('click', function () {
+        if (isMobileWidth()) {
+          closeSidebar();
+        }
+      });
+    });
+    window.addEventListener('resize', function () {
+      if (!isMobileWidth()) {
+        closeSidebar();
+      }
+    });
+
+    document.querySelectorAll('form').forEach(function (formEl) {
+      if (!formEl.classList.contains('layui-form')) {
+        formEl.classList.add('layui-form');
+      }
+      if (formEl.classList.contains('inline-form') && !formEl.classList.contains('layui-form-pane')) {
+        formEl.classList.add('layui-form-pane');
+      }
+    });
+
+    document.querySelectorAll('input, textarea, select').forEach(function (el) {
+      if (el.tagName === 'TEXTAREA') {
+        el.classList.add('layui-textarea');
+        return;
+      }
+      if (el.tagName === 'SELECT') {
+        return;
+      }
+      const inputType = String(el.getAttribute('type') || '').toLowerCase();
+      if (inputType === 'checkbox' || inputType === 'radio' || inputType === 'hidden') {
+        return;
+      }
+      el.classList.add('layui-input');
+    });
+
+    document.querySelectorAll('button').forEach(function (buttonEl) {
+      buttonEl.classList.add('layui-btn');
+      if (!buttonEl.classList.contains('danger') && !buttonEl.classList.contains('ghost')) {
+        buttonEl.classList.add('layui-btn-sm');
+      }
+      if (buttonEl.classList.contains('danger')) {
+        buttonEl.classList.add('layui-btn-danger');
+      }
+      if (buttonEl.classList.contains('ghost')) {
+        buttonEl.classList.add('layui-btn-primary');
+      }
+      if (buttonEl.type === 'button') {
+        buttonEl.classList.add('layui-btn-primary');
+      }
+    });
+
+    document.querySelectorAll('table').forEach(function (tableEl) {
+      tableEl.classList.add('layui-table', 'layui-table-size-sm');
+    });
+
+    if (window.layui) {
+      layui.use(['form', 'element'], function () {
+        layui.form.render();
+      });
+    }
+  });
+</script>

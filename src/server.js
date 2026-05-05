@@ -3853,6 +3853,219 @@ function buildAdminStats(accounts) {
   };
 }
 
+function buildHourBucketKey(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+    return '';
+  }
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hour = String(date.getHours()).padStart(2, '0');
+  return `${year}-${month}-${day} ${hour}`;
+}
+
+function buildRecentHourSlots(count = 24) {
+  const slots = [];
+  const now = new Date();
+  now.setMinutes(0, 0, 0);
+  const length = Math.max(Math.floor(Number(count) || 24), 1);
+  for (let offset = length - 1; offset >= 0; offset -= 1) {
+    const time = new Date(now.getTime() - (offset * 60 * 60 * 1000));
+    slots.push({
+      key: buildHourBucketKey(time),
+      label: `${String(time.getHours()).padStart(2, '0')}:00`
+    });
+  }
+  return slots;
+}
+
+function percentileFromSorted(values, percentile) {
+  if (!Array.isArray(values) || values.length === 0) {
+    return 0;
+  }
+  const p = Math.min(Math.max(Number(percentile) || 0, 0), 100);
+  if (values.length === 1) {
+    return values[0];
+  }
+  const index = (p / 100) * (values.length - 1);
+  const lowerIndex = Math.floor(index);
+  const upperIndex = Math.ceil(index);
+  if (lowerIndex === upperIndex) {
+    return values[lowerIndex];
+  }
+  const ratio = index - lowerIndex;
+  return values[lowerIndex] + ((values[upperIndex] - values[lowerIndex]) * ratio);
+}
+
+function buildAdminDashboardData(accounts) {
+  ensureRuntimeDailyStats(new Date());
+  const slots = buildRecentHourSlots(24);
+  const hourlyMap = new Map();
+  for (const slot of slots) {
+    hourlyMap.set(slot.key, {
+      requests: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedTokens: 0
+    });
+  }
+
+  const last24hStartMs = Date.now() - (24 * 60 * 60 * 1000);
+  const providerMap = new Map();
+  const statusMap = new Map([
+    ['2xx', 0],
+    ['4xx', 0],
+    ['5xx', 0],
+    ['other', 0]
+  ]);
+  const modelMap = new Map();
+
+  const todayKey = currentLocalDayKey(new Date());
+  let todayRequests = 0;
+  let todaySuccess = 0;
+  let todayCostMinor = 0;
+  const todayLatencies = [];
+
+  for (const entry of requestLogs) {
+    const date = new Date(entry.at || '');
+    if (Number.isNaN(date.getTime())) {
+      continue;
+    }
+
+    const statusCode = Number(entry.statusCode) || 0;
+    const requestTokens = Math.max(Number(entry.tokens) || 0, 0);
+    const inputTokens = Math.max(Number(entry.inputTokens) || 0, 0);
+    const outputTokens = Math.max(Number(entry.outputTokens) || 0, 0);
+    const cachedTokens = Math.max(Number(entry.cachedTokens) || 0, 0);
+    const durationMs = Math.max(Number(entry.durationMs) || 0, 0);
+    const costMinor = Math.max(Number(entry.costMinor) || 0, 0);
+
+    const entryDay = currentLocalDayKey(date);
+    if (entryDay === todayKey) {
+      todayRequests += 1;
+      if (statusCode >= 200 && statusCode < 300) {
+        todaySuccess += 1;
+      }
+      todayCostMinor += costMinor;
+      todayLatencies.push(durationMs);
+    }
+
+    if (date.getTime() >= last24hStartMs) {
+      const hourKey = buildHourBucketKey(date);
+      const hourBucket = hourlyMap.get(hourKey);
+      if (hourBucket) {
+        hourBucket.requests += 1;
+        hourBucket.inputTokens += inputTokens;
+        hourBucket.outputTokens += outputTokens;
+        hourBucket.cachedTokens += cachedTokens;
+      }
+
+      const provider = String(entry.provider || 'unknown').trim().toLowerCase() || 'unknown';
+      providerMap.set(provider, (providerMap.get(provider) || 0) + 1);
+
+      const model = String(entry.model || '').trim();
+      if (model && model !== '-') {
+        const existing = modelMap.get(model) || {
+          model,
+          requests: 0,
+          tokens: 0,
+          costMinor: 0
+        };
+        existing.requests += 1;
+        existing.tokens += requestTokens;
+        existing.costMinor += costMinor;
+        modelMap.set(model, existing);
+      }
+
+      if (statusCode >= 200 && statusCode < 300) {
+        statusMap.set('2xx', (statusMap.get('2xx') || 0) + 1);
+      } else if (statusCode >= 400 && statusCode < 500) {
+        statusMap.set('4xx', (statusMap.get('4xx') || 0) + 1);
+      } else if (statusCode >= 500) {
+        statusMap.set('5xx', (statusMap.get('5xx') || 0) + 1);
+      } else {
+        statusMap.set('other', (statusMap.get('other') || 0) + 1);
+      }
+    }
+  }
+
+  const sortedLatencies = todayLatencies.slice().sort((left, right) => left - right);
+  const p95LatencyMs = Math.round(percentileFromSorted(sortedLatencies, 95));
+  const avgLatencyMs = sortedLatencies.length
+    ? Math.round(sortedLatencies.reduce((sum, value) => sum + value, 0) / sortedLatencies.length)
+    : 0;
+
+  const currency = String(settings.defaultCurrency || 'USD').toUpperCase();
+  const factor = currency === 'JPY' ? 1 : 100;
+  const todayCostMajor = Number((todayCostMinor / factor).toFixed(factor === 1 ? 0 : 2));
+  const successRate = todayRequests > 0 ? (todaySuccess / todayRequests) : 0;
+
+  const hourlySeries = slots.map((slot) => hourlyMap.get(slot.key) || {
+    requests: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedTokens: 0
+  });
+
+  const modelTopList = Array.from(modelMap.values())
+    .sort((left, right) => right.tokens - left.tokens)
+    .slice(0, 10)
+    .map((item) => ({
+      model: item.model,
+      requests: item.requests,
+      tokens: item.tokens,
+      costMinor: item.costMinor,
+      cost: Number((item.costMinor / factor).toFixed(factor === 1 ? 0 : 2))
+    }));
+
+  const providerSeries = Array.from(providerMap.entries())
+    .sort((left, right) => right[1] - left[1])
+    .map(([name, value]) => ({ name, value }));
+
+  const statusSeries = [
+    { name: '2xx', value: statusMap.get('2xx') || 0 },
+    { name: '4xx', value: statusMap.get('4xx') || 0 },
+    { name: '5xx', value: statusMap.get('5xx') || 0 },
+    { name: 'other', value: statusMap.get('other') || 0 }
+  ];
+
+  const groups = store.listGroups();
+  const accessKeys = store.listAccessKeys();
+  const groupCount = groups.filter((item) => item.enabled).length;
+  const accessKeyCount = accessKeys.filter((item) => item.enabled).length;
+  const activeAccountCount = accounts.filter((item) => item.enabled).length;
+
+  return {
+    cards: {
+      todayRequests: runtimeDailyStats.requestCount,
+      todayInputTokens: runtimeDailyStats.inputTokens,
+      todayOutputTokens: runtimeDailyStats.outputTokens,
+      todayCachedTokens: runtimeDailyStats.cachedTokens,
+      todayTotalTokens: runtimeDailyStats.totalTokens,
+      todayCost: todayCostMajor,
+      currency,
+      successRate,
+      avgLatencyMs,
+      p95LatencyMs,
+      groupCount,
+      accessKeyCount,
+      activeAccountCount
+    },
+    charts: {
+      hourLabels: slots.map((slot) => slot.label),
+      requestSeries: hourlySeries.map((item) => item.requests),
+      inputTokenSeries: hourlySeries.map((item) => item.inputTokens),
+      outputTokenSeries: hourlySeries.map((item) => item.outputTokens),
+      cachedTokenSeries: hourlySeries.map((item) => item.cachedTokens),
+      providerSeries,
+      statusSeries,
+      modelNames: modelTopList.map((item) => item.model),
+      modelTokenSeries: modelTopList.map((item) => item.tokens)
+    },
+    topModels: modelTopList
+  };
+}
+
 function loadAccountPageData() {
   cleanupStickyBindings();
   settings = store.getSettings();
@@ -3900,7 +4113,20 @@ function loadAccountPageData() {
 }
 
 app.get('/admin', adminOnly, (req, res) => {
-  return res.redirect('/admin/accounts');
+  return res.redirect('/admin/home');
+});
+
+app.get('/admin/home', adminOnly, (req, res) => {
+  const { accounts } = loadAccountPageData();
+  const stats = buildAdminStats(accounts);
+  const dashboard = buildAdminDashboardData(accounts);
+  res.render('admin-home', {
+    activePage: 'home',
+    settings,
+    stats,
+    dashboard,
+    notice: req.query.notice || ''
+  });
 });
 
 app.get('/admin/accounts', adminOnly, (req, res) => {

@@ -8,19 +8,29 @@
     <link rel="stylesheet" href="/public/style.css" />
   </head>
   <body class="login-body">
-    <main class="card login-card">
+    <main class="card login-card layui-card">
       <h1>OpenAI Responses Gateway</h1>
-      <p>管理员登录</p>
+      <p class="muted">管理员登录</p>
       <% if (error) { %>
-        <div class="alert"><%= error %></div>
+        <div class="alert layui-bg-red"><%= error %></div>
       <% } %>
-      <form method="post" action="/admin/login">
+      <form method="post" action="/admin/login" class="layui-form layui-form-pane">
         <label>用户名</label>
-        <input name="username" placeholder="admin" required />
+        <input class="layui-input" name="username" placeholder="admin" required />
         <label>密码</label>
-        <input name="password" type="password" required />
-        <button type="submit">登录</button>
+        <input class="layui-input" name="password" type="password" required />
+        <button class="layui-btn" type="submit">登录</button>
       </form>
     </main>
+    <script defer src="https://cdn.jsdelivr.net/npm/layui@2.9.18/dist/layui.js"></script>
+    <script>
+      document.addEventListener('DOMContentLoaded', function () {
+        if (window.layui) {
+          layui.use(['form'], function () {
+            layui.form.render();
+          });
+        }
+      });
+    </script>
   </body>
 </html>

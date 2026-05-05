@@ -7,14 +7,14 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/layui@2.9.18/dist/css/layui.css" />
     <link rel="stylesheet" href="/public/style.css" />
   </head>
-  <body>
+  <body class="admin-layout">
     <%- include('partials/admin_nav', { activePage, stats, notice }) %>
 
     <section class="card">
       <div class="log-head">
         <h2>实时请求日志</h2>
         <div class="kpi-pills">
-          <span id="streamState" class="pill pill-warn">连接中</span>
+          <span id="streamState" class="pill log-warn">连接中</span>
           <button id="clearRows" type="button" class="ghost">清空当前列表</button>
         </div>
       </div>
