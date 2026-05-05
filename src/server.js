@@ -2766,6 +2766,360 @@ function createChatCompletionsToResponsesSseTransform(
   };
 }
 
+function createAnthropicCompatStreamParser(
+  { messageId, model } = {}
+) {
+  const mid = String(messageId || `msg_${crypto.randomUUID()}`).trim();
+  let currentModel = String(model || '').trim();
+  let currentUsageRaw = {};
+  let finalized = false;
+  let messageStarted = false;
+  let textBlockStarted = false;
+  let textBlockClosed = false;
+  let textBlockIndex = null;
+  let nextContentIndex = 0;
+  let finalFinishReason = '';
+  const toolStates = new Map();
+
+  const emitEvent = (event, payload) => (
+    `event: ${event}\n` +
+    `data: ${JSON.stringify(payload)}\n\n`
+  );
+
+  const buildAnthropicUsage = () => {
+    const metrics = getModelUsage(currentUsageRaw || {});
+    const payload = {
+      input_tokens: metrics.input,
+      output_tokens: metrics.output
+    };
+    if (metrics.cacheRead > 0) {
+      payload.cache_read_input_tokens = metrics.cacheRead;
+    }
+    if (metrics.cacheWrite > 0) {
+      payload.cache_creation_input_tokens = metrics.cacheWrite;
+    }
+    return payload;
+  };
+
+  const ensureMessageStart = () => {
+    if (messageStarted) {
+      return '';
+    }
+    messageStarted = true;
+    return emitEvent('message_start', {
+      type: 'message_start',
+      message: {
+        id: mid,
+        type: 'message',
+        role: 'assistant',
+        content: [],
+        model: currentModel || '',
+        stop_reason: null,
+        stop_sequence: null,
+        usage: buildAnthropicUsage()
+      }
+    });
+  };
+
+  const ensureTextBlockStart = () => {
+    if (textBlockStarted && !textBlockClosed) {
+      return '';
+    }
+    textBlockStarted = true;
+    textBlockClosed = false;
+    textBlockIndex = nextContentIndex;
+    nextContentIndex += 1;
+    return emitEvent('content_block_start', {
+      type: 'content_block_start',
+      index: textBlockIndex,
+      content_block: {
+        type: 'text',
+        text: ''
+      }
+    });
+  };
+
+  const closeTextBlockIfNeeded = () => {
+    if (!textBlockStarted || textBlockClosed || !Number.isFinite(textBlockIndex)) {
+      return '';
+    }
+    textBlockClosed = true;
+    return emitEvent('content_block_stop', {
+      type: 'content_block_stop',
+      index: textBlockIndex
+    });
+  };
+
+  const ensureToolState = (toolIndex) => {
+    const normalizedIndex = Number.isFinite(toolIndex) ? Math.max(0, Math.floor(toolIndex)) : toolStates.size;
+    if (toolStates.has(normalizedIndex)) {
+      return toolStates.get(normalizedIndex);
+    }
+    const state = {
+      toolIndex: normalizedIndex,
+      contentIndex: nextContentIndex,
+      id: '',
+      name: '',
+      pendingArguments: '',
+      started: false,
+      stopped: false
+    };
+    nextContentIndex += 1;
+    toolStates.set(normalizedIndex, state);
+    return state;
+  };
+
+  const ensureToolStart = (state) => {
+    if (!state || state.started) {
+      return '';
+    }
+    if (!state.name) {
+      return '';
+    }
+    state.started = true;
+    state.stopped = false;
+    if (!state.id) {
+      state.id = `toolu_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;
+    }
+    return emitEvent('content_block_start', {
+      type: 'content_block_start',
+      index: state.contentIndex,
+      content_block: {
+        type: 'tool_use',
+        id: state.id,
+        name: state.name,
+        input: {}
+      }
+    });
+  };
+
+  const closeToolIfNeeded = (state) => {
+    if (!state || !state.started || state.stopped) {
+      return '';
+    }
+    state.stopped = true;
+    return emitEvent('content_block_stop', {
+      type: 'content_block_stop',
+      index: state.contentIndex
+    });
+  };
+
+  const closeAllToolBlocks = () => {
+    const parts = [];
+    const ordered = Array.from(toolStates.values())
+      .sort((left, right) => left.contentIndex - right.contentIndex);
+    for (const state of ordered) {
+      const maybeStart = ensureToolStart(state);
+      if (maybeStart) {
+        parts.push(maybeStart);
+      }
+      const maybeClose = closeToolIfNeeded(state);
+      if (maybeClose) {
+        parts.push(maybeClose);
+      }
+    }
+    return parts.join('');
+  };
+
+  const finish = () => {
+    if (finalized) {
+      return '';
+    }
+    finalized = true;
+    const parts = [];
+    parts.push(ensureMessageStart());
+    parts.push(closeTextBlockIfNeeded());
+    parts.push(closeAllToolBlocks());
+    parts.push(emitEvent('message_delta', {
+      type: 'message_delta',
+      delta: {
+        stop_reason: mapFinishReasonToAnthropicStopReason(finalFinishReason),
+        stop_sequence: null
+      },
+      usage: buildAnthropicUsage()
+    }));
+    parts.push(emitEvent('message_stop', {
+      type: 'message_stop'
+    }));
+    parts.push('data: [DONE]\n\n');
+    return parts.join('');
+  };
+
+  const consumeChunk = (chunk) => {
+    if (!chunk || typeof chunk !== 'object') {
+      return '';
+    }
+    const parts = [];
+    if ((chunk.error && typeof chunk.error === 'object') || String(chunk.type || '').toLowerCase() === 'error') {
+      const message = extractErrorDetail(chunk, 'Upstream stream error');
+      parts.push(emitEvent('error', {
+        type: 'error',
+        error: {
+          type: String(chunk.error?.type || chunk.type || 'api_error'),
+          message
+        }
+      }));
+      return parts.join('');
+    }
+    if (chunk.model && !currentModel) {
+      currentModel = String(chunk.model || '');
+    }
+    if (chunk.usage && typeof chunk.usage === 'object') {
+      currentUsageRaw = chunk.usage;
+    }
+    parts.push(ensureMessageStart());
+    const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
+    for (const choice of choices) {
+      const delta = choice?.delta || {};
+      const finishReason = String(choice?.finish_reason || '').trim();
+      if (finishReason) {
+        finalFinishReason = finishReason;
+      }
+
+      let textDelta = extractChatDeltaText(delta.content);
+      if (!textDelta && typeof delta.content === 'string') {
+        textDelta = delta.content;
+      }
+      if (textDelta) {
+        parts.push(ensureTextBlockStart());
+        parts.push(emitEvent('content_block_delta', {
+          type: 'content_block_delta',
+          index: textBlockIndex,
+          delta: {
+            type: 'text_delta',
+            text: textDelta
+          }
+        }));
+      }
+
+      if (Array.isArray(delta.tool_calls)) {
+        const maybeCloseText = closeTextBlockIfNeeded();
+        if (maybeCloseText) {
+          parts.push(maybeCloseText);
+        }
+        for (const toolCallDelta of delta.tool_calls) {
+          const state = ensureToolState(toolCallDelta?.index);
+          if (toolCallDelta?.id) {
+            state.id = String(toolCallDelta.id || '').trim() || state.id;
+          }
+          if (toolCallDelta?.function?.name) {
+            state.name = String(toolCallDelta.function.name || '').trim();
+          }
+          const startEvent = ensureToolStart(state);
+          if (startEvent) {
+            parts.push(startEvent);
+            if (state.pendingArguments) {
+              parts.push(emitEvent('content_block_delta', {
+                type: 'content_block_delta',
+                index: state.contentIndex,
+                delta: {
+                  type: 'input_json_delta',
+                  partial_json: state.pendingArguments
+                }
+              }));
+              state.pendingArguments = '';
+            }
+          }
+          if (typeof toolCallDelta?.function?.arguments === 'string' && toolCallDelta.function.arguments) {
+            if (!state.started) {
+              state.pendingArguments += toolCallDelta.function.arguments;
+            } else {
+              parts.push(emitEvent('content_block_delta', {
+                type: 'content_block_delta',
+                index: state.contentIndex,
+                delta: {
+                  type: 'input_json_delta',
+                  partial_json: toolCallDelta.function.arguments
+                }
+              }));
+            }
+          }
+        }
+      }
+    }
+    return parts.join('');
+  };
+
+  return {
+    consumeChunk,
+    finish,
+    getUsage: () => getModelUsage(currentUsageRaw || {})
+  };
+}
+
+function createChatCompletionsToAnthropicSseTransform(
+  { messageId, model } = {}
+) {
+  const parser = createAnthropicCompatStreamParser({ messageId, model });
+  let buffer = '';
+  let currentDataLines = [];
+
+  const flushData = (push) => {
+    if (!currentDataLines.length) {
+      return;
+    }
+    const payloadText = currentDataLines.join('\n').trim();
+    currentDataLines = [];
+    if (!payloadText) {
+      return;
+    }
+    if (payloadText === '[DONE]') {
+      push(parser.finish());
+      return;
+    }
+    const payload = safeJsonParse(payloadText);
+    if (!payload) {
+      return;
+    }
+    push(parser.consumeChunk(payload));
+  };
+
+  const transformer = new Transform({
+    transform(chunk, _encoding, callback) {
+      buffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk || '');
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (line === '') {
+          flushData((eventPayload) => {
+            if (eventPayload) {
+              this.push(eventPayload);
+            }
+          });
+          continue;
+        }
+        if (line.startsWith('data:')) {
+          currentDataLines.push(line.slice(5).trimStart());
+        }
+      }
+      callback();
+    },
+    flush(callback) {
+      if (buffer) {
+        if (buffer.startsWith('data:')) {
+          currentDataLines.push(buffer.slice(5).trimStart());
+        }
+        buffer = '';
+      }
+      flushData((eventPayload) => {
+        if (eventPayload) {
+          this.push(eventPayload);
+        }
+      });
+      const tail = parser.finish();
+      if (tail) {
+        this.push(tail);
+      }
+      callback();
+    }
+  });
+
+  return {
+    transformer,
+    getUsage: () => parser.getUsage()
+  };
+}
+
 function createStreamUsageObserver(contentType, { onUsage, onPayload, onResponseId } = {}) {
   const lower = String(contentType || '').toLowerCase();
   const isSse = lower.includes('text/event-stream');
@@ -4371,6 +4725,7 @@ app.all('/v1/*', async (req, res) => {
 
   const promptCacheConfig = getPromptCacheConfigForGroupKey(requestGroupKey);
   const canUsePromptCache = Boolean(promptCacheConfig && isPromptCacheCandidateRequest(req));
+  let promptCacheBypassReason = '';
   if (canUsePromptCache) {
     let cacheChatBody = null;
     let cacheResponseMode = '';
@@ -4383,10 +4738,6 @@ app.all('/v1/*', async (req, res) => {
     } else if (isAnthropicMessagesCreate) {
       cacheChatBody = convertAnthropicMessagesRequestToChatRequest(jsonBody);
       cacheResponseMode = 'anthropic';
-      if (cacheChatBody && cacheChatBody.stream === true) {
-        // First checkpoint: only non-stream Claude caching path.
-        cacheChatBody = null;
-      }
     }
 
     if (cacheChatBody && cacheChatBody.model) {
@@ -4400,6 +4751,9 @@ app.all('/v1/*', async (req, res) => {
         'content-type': 'application/json',
         'user-agent': 'responses-gateway/1.0 (+prompt-cache)'
       };
+      if (promptCacheConfig.authToken) {
+        promptCacheHeaders.authorization = `Bearer ${promptCacheConfig.authToken}`;
+      }
       const promptCacheBodyBuffer = Buffer.from(JSON.stringify(cacheChatBody), 'utf8');
       try {
         let cacheUpstream = await fetch(promptCacheTargetUrl, {
@@ -4517,6 +4871,14 @@ app.all('/v1/*', async (req, res) => {
           res.setHeader('content-type', 'text/event-stream; charset=utf-8');
           res.setHeader('cache-control', 'no-cache, no-transform');
           outgoingStream = sourceStream.pipe(compatTransform.transformer);
+        } else if (cacheResponseMode === 'anthropic') {
+          const anthropicTransform = createChatCompletionsToAnthropicSseTransform({
+            messageId: `msg_${crypto.randomUUID()}`,
+            model: requestModel || upstreamModel || ''
+          });
+          res.setHeader('content-type', 'text/event-stream; charset=utf-8');
+          res.setHeader('cache-control', 'no-cache, no-transform');
+          outgoingStream = sourceStream.pipe(anthropicTransform.transformer);
         }
 
         let streamUsage = null;
@@ -4561,15 +4923,10 @@ app.all('/v1/*', async (req, res) => {
         outgoingStream.pipe(usageObserver).pipe(res);
         return;
       } catch (error) {
-        writeRequestLog({
-          statusCode: 502,
-          errorDetail: `PromptCache proxy failed: ${error?.message || 'unknown error'}`
-        });
-        res.status(502).json({
-          error: 'PromptCache proxy failed',
-          detail: error?.message || 'unknown error'
-        });
-        return;
+        promptCacheBypassReason = sanitizeLogText(
+          `PromptCache bypass: ${error?.message || 'unknown error'}`,
+          220
+        );
       }
     }
   }
@@ -4630,7 +4987,11 @@ app.all('/v1/*', async (req, res) => {
   if (selection.error || !selection.account) {
     writeRequestLog({
       statusCode: 429,
-      errorDetail: selection.error || 'No account available'
+      errorDetail: (
+        promptCacheBypassReason
+          ? `${selection.error || 'No account available'} | ${promptCacheBypassReason}`
+          : (selection.error || 'No account available')
+      )
     });
     res.status(429).json({ error: selection.error || 'No account available' });
     return;
@@ -4641,7 +5002,7 @@ app.all('/v1/*', async (req, res) => {
   const maxAttemptCount = 3;
   let attemptCount = 1;
   let switchCount = 0;
-  let lastRetryReason = '';
+  let lastRetryReason = promptCacheBypassReason;
   let activeCompatUnsupportedFields = [];
   const excludedAccounts = new Set();
   const writeAttemptLog = (payload) => {
@@ -4787,6 +5148,10 @@ app.all('/v1/*', async (req, res) => {
     }
     if (requestModel && upstreamModel && requestModel !== upstreamModel) {
       res.setHeader('x-gateway-model-mapped', `${requestModel}->${upstreamModel}`);
+    }
+    if (promptCacheBypassReason) {
+      res.setHeader('x-gateway-cache-proxy', 'bypass');
+      res.setHeader('x-gateway-cache-bypass', promptCacheBypassReason);
     }
   };
 

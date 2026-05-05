@@ -27,8 +27,8 @@
         <label>PromptCache Base URL</label>
         <input name="cacheBaseUrl" placeholder="http://127.0.0.1:8080" />
 
-        <label>PromptCache 管理Token（可选）</label>
-        <input name="cacheAuthToken" placeholder="用于读取 /v1/stats（可留空）" />
+        <label>PromptCache 访问Token（可选）</label>
+        <input name="cacheAuthToken" placeholder="用于请求缓存与读取统计（可留空）" />
 
         <label class="checkline"><input name="enabled" type="checkbox" checked /> 启用</label>
 
@@ -64,8 +64,8 @@
               <label>PromptCache Base URL</label>
               <input name="cacheBaseUrl" value="<%= group.cacheBaseUrl || '' %>" placeholder="http://127.0.0.1:8080" />
 
-              <label>PromptCache 管理Token（可选）</label>
-              <input name="cacheAuthToken" value="<%= group.cacheAuthToken || '' %>" placeholder="用于读取 /v1/stats（可留空）" />
+              <label>PromptCache 访问Token（可选）</label>
+              <input name="cacheAuthToken" value="<%= group.cacheAuthToken || '' %>" placeholder="用于请求缓存与读取统计（可留空）" />
 
               <label class="checkline"><input name="enabled" type="checkbox" <%= group.enabled ? 'checked' : '' %> /> 启用</label>
               <button class="layui-btn layui-btn-sm" type="submit">保存分组</button>
