@@ -144,5 +144,9 @@
         layui.form.render();
       });
     }
+
+    window.requestAnimationFrame(function () {
+      document.body.classList.add('ui-ready');
+    });
   });
 </script>

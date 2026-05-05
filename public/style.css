@@ -28,6 +28,23 @@ body.admin-layout {
   padding: 88px 14px 20px 246px;
 }
 
+body.admin-layout:not(.ui-ready) .topbar,
+body.admin-layout:not(.ui-ready) .quick-stats,
+body.admin-layout:not(.ui-ready) .page-grid,
+body.admin-layout:not(.ui-ready) .dashboard-grid,
+body.admin-layout:not(.ui-ready) > .card {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+body.admin-layout .topbar,
+body.admin-layout .quick-stats,
+body.admin-layout .page-grid,
+body.admin-layout .dashboard-grid,
+body.admin-layout > .card {
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+
 h1,
 h2,
 h3,
@@ -102,16 +119,36 @@ p {
   border-radius: 4px;
   color: #cbd5e1;
   line-height: 20px;
+  position: relative;
+  transition: background-color 0.2s ease, color 0.2s ease, transform 0.18s ease;
 }
 
 .sidebar-nav.layui-nav .layui-nav-item a:hover {
   background: var(--sidebar-hover);
   color: #fff;
+  transform: translateX(2px);
 }
 
 .sidebar-nav.layui-nav .layui-this > a {
   background: var(--sidebar-active);
   color: #fff !important;
+  transform: translateX(2px);
+}
+
+.sidebar-nav.layui-nav .layui-nav-item a::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 2px;
+  height: 0;
+  background: rgba(255, 255, 255, 0.92);
+  transition: height 0.2s ease, top 0.2s ease;
+}
+
+.sidebar-nav.layui-nav .layui-this > a::after {
+  top: 9px;
+  height: calc(100% - 18px);
 }
 
 .sidebar-nav.layui-nav .layui-nav-itemed > a,
@@ -135,7 +172,9 @@ p {
 }
 
 .sidebar-mask {
-  display: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.2s ease, visibility 0.2s ease;
 }
 
 .topbar {
@@ -152,6 +191,7 @@ p {
   border-radius: 4px;
   box-shadow: 0 6px 24px rgba(15, 23, 42, 0.06);
   overflow: hidden;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
 }
 
 .topbar .layui-card-body {
@@ -189,6 +229,14 @@ p {
   border-radius: 4px;
   padding: 12px;
   margin-bottom: 12px;
+  transition: border-color 0.18s ease, box-shadow 0.2s ease;
+}
+
+@media (hover: hover) {
+  .card:hover {
+    border-color: #d7e1ee;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+  }
 }
 
 .grid.stats {
@@ -311,10 +359,17 @@ button {
   color: #fff;
   padding: 8px 12px;
   font-weight: 600;
+  transition: transform 0.12s ease, box-shadow 0.18s ease, background-color 0.18s ease, border-color 0.18s ease;
 }
 
 button:hover {
   opacity: 0.95;
+  box-shadow: 0 4px 14px rgba(2, 6, 23, 0.12);
+}
+
+button:active {
+  transform: translateY(1px);
+  box-shadow: none;
 }
 
 button.ghost {
@@ -618,11 +673,13 @@ th {
     inset: 0;
     z-index: 55;
     background: rgba(15, 23, 42, 0.45);
-    display: none;
+    opacity: 0;
+    visibility: hidden;
   }
 
   body.sidebar-open .sidebar-mask {
-    display: block;
+    opacity: 1;
+    visibility: visible;
   }
 
   .topbar {
