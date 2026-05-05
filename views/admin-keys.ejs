@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>分组Key - Responses Gateway</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/layui@2.9.18/dist/css/layui.css" />
+    <link rel="stylesheet" href="/public/style.css" />
+  </head>
+  <body>
+    <%- include('partials/admin_nav', { activePage, stats, notice }) %>
+
+    <% if (freshToken) { %>
+      <section class="card">
+        <h2>新生成的 Key（仅此处展示）</h2>
+        <p><code><%= freshToken %></code></p>
+      </section>
+    <% } %>
+
+    <section class="card">
+      <h2>创建分组 Key</h2>
+      <form method="post" action="/admin/keys" class="inline-form">
+        <label>Key 名称</label>
+        <input name="name" placeholder="codex-prod-key" required />
+
+        <label>绑定分组(可选)</label>
+        <select name="groupId">
+          <option value="">不绑定(全局池)</option>
+          <% groups.forEach((group) => { %>
+            <option value="<%= group.id %>"><%= group.name %> (<%= group.groupKey %>)</option>
+          <% }) %>
+        </select>
+
+        <button type="submit">自动生成安全 Key</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Key 列表</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>Key(掩码)</th>
+              <th>绑定分组</th>
+              <th>状态</th>
+              <th>最后使用</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <% accessKeys.forEach((item) => { %>
+              <tr>
+                <td><%= item.name %></td>
+                <td><code><%= item.maskedToken %></code></td>
+                <td><%= item.groupName ? `${item.groupName} (${item.groupKey})` : '全局池' %></td>
+                <td><%= item.enabled ? '启用' : '停用' %></td>
+                <td><%= item.lastUsedAt || '-' %></td>
+                <td>
+                  <form method="post" action="/admin/keys/<%= item.id %>/update" class="inline-form compact">
+                    <label>名称</label>
+                    <input name="name" value="<%= item.name %>" required />
+
+                    <label>绑定分组</label>
+                    <select name="groupId">
+                      <option value="" <%= !item.groupId ? 'selected' : '' %>>不绑定(全局池)</option>
+                      <% groups.forEach((group) => { %>
+                        <option value="<%= group.id %>" <%= item.groupId === group.id ? 'selected' : '' %>><%= group.name %> (<%= group.groupKey %>)</option>
+                      <% }) %>
+                    </select>
+
+                    <label class="checkline"><input name="enabled" type="checkbox" <%= item.enabled ? 'checked' : '' %> /> 启用</label>
+                    <button class="ghost" type="submit">保存</button>
+                  </form>
+
+                  <form method="post" action="/admin/keys/<%= item.id %>/delete" onsubmit="return confirm('确认删除 key?')">
+                    <button class="danger" type="submit">删除</button>
+                  </form>
+                </td>
+              </tr>
+            <% }) %>
+            <% if (!accessKeys.length) { %>
+              <tr><td colspan="6" class="muted">暂无 Key，请先创建</td></tr>
+            <% } %>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </body>
+</html>

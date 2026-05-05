@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>分组池 - Responses Gateway</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/layui@2.9.18/dist/css/layui.css" />
+    <link rel="stylesheet" href="/public/style.css" />
+  </head>
+  <body>
+    <%- include('partials/admin_nav', { activePage, stats, notice }) %>
+
+    <section class="card">
+      <h2>创建分组池</h2>
+      <form method="post" action="/admin/groups" class="inline-form">
+        <label>分组名称</label>
+        <input name="name" placeholder="codex-prod" required />
+
+        <label>分组标识Key</label>
+        <input name="groupKey" placeholder="grp_codex_prod" required />
+
+        <label>描述</label>
+        <input name="description" placeholder="给 Codex 生产流量" />
+
+        <label class="checkline"><input name="cacheEnabled" type="checkbox" /> 开启 PromptCache 中间层</label>
+
+        <label>PromptCache Base URL</label>
+        <input name="cacheBaseUrl" placeholder="http://127.0.0.1:8080" />
+
+        <label>PromptCache 管理Token（可选）</label>
+        <input name="cacheAuthToken" placeholder="用于读取 /v1/stats（可留空）" />
+
+        <label class="checkline"><input name="enabled" type="checkbox" checked /> 启用</label>
+
+        <button class="layui-btn layui-btn-sm" type="submit">创建分组</button>
+      </form>
+      <p class="muted">分组用于绑定账号池。请求侧通过「分组 Key 页面」创建的访问 key 自动命中对应分组。</p>
+    </section>
+
+    <section class="card">
+      <h2>分组列表</h2>
+      <div class="accounts">
+        <% groups.forEach((group) => { %>
+          <article class="account <%= group.enabled ? '' : 'disabled' %>">
+            <h3><%= group.name %> <small>(<%= group.enabled ? '启用' : '停用' %>)</small></h3>
+            <p>Group Key: <code><%= group.groupKey %></code></p>
+            <p>成员数: <%= group.members.length %></p>
+            <p>描述: <%= group.description || '-' %></p>
+            <p>缓存中间层: <%= group.cacheEnabled ? '启用' : '关闭' %></p>
+            <p>缓存地址: <code><%= group.cacheBaseUrl || '-' %></code></p>
+
+            <form method="post" action="/admin/groups/<%= group.id %>/update" class="inline-form compact">
+              <label>名称</label>
+              <input name="name" value="<%= group.name %>" required />
+
+              <label>Group Key</label>
+              <input name="groupKey" value="<%= group.groupKey %>" required />
+
+              <label>描述</label>
+              <input name="description" value="<%= group.description %>" />
+
+              <label class="checkline"><input name="cacheEnabled" type="checkbox" <%= group.cacheEnabled ? 'checked' : '' %> /> 启用 PromptCache</label>
+
+              <label>PromptCache Base URL</label>
+              <input name="cacheBaseUrl" value="<%= group.cacheBaseUrl || '' %>" placeholder="http://127.0.0.1:8080" />
+
+              <label>PromptCache 管理Token（可选）</label>
+              <input name="cacheAuthToken" value="<%= group.cacheAuthToken || '' %>" placeholder="用于读取 /v1/stats（可留空）" />
+
+              <label class="checkline"><input name="enabled" type="checkbox" <%= group.enabled ? 'checked' : '' %> /> 启用</label>
+              <button class="layui-btn layui-btn-sm" type="submit">保存分组</button>
+            </form>
+
+            <h4>分组成员</h4>
+            <form method="post" action="/admin/groups/<%= group.id %>/members/upsert" class="inline-form compact">
+              <label>账号</label>
+              <select name="accountId" required>
+                <option value="">选择账号</option>
+                <% accounts.forEach((account) => { %>
+                  <option value="<%= account.id %>"><%= account.name %></option>
+                <% }) %>
+              </select>
+
+              <label>分组权重</label>
+              <input name="weight" type="number" min="1" value="1" required />
+
+              <button class="layui-btn layui-btn-sm" type="submit">添加/更新成员</button>
+            </form>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>账号</th>
+                    <th>状态</th>
+                    <th>权重</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <% group.members.forEach((member) => { %>
+                    <tr>
+                      <td><%= member.accountName %></td>
+                      <td><%= member.accountEnabled ? '启用' : '停用' %></td>
+                      <td><%= member.weight %></td>
+                      <td>
+                        <form method="post" action="/admin/groups/<%= group.id %>/members/delete">
+                          <input type="hidden" name="accountId" value="<%= member.accountId %>" />
+                          <button class="danger layui-btn layui-btn-danger layui-btn-xs" type="submit">移除</button>
+                        </form>
+                      </td>
+                    </tr>
+                  <% }) %>
+                  <% if (!group.members.length) { %>
+                    <tr><td colspan="4" class="muted">暂无成员</td></tr>
+                  <% } %>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="actions">
+              <form method="post" action="/admin/groups/<%= group.id %>/delete" onsubmit="return confirm('确认删除分组?')">
+                <button class="danger layui-btn layui-btn-danger layui-btn-sm" type="submit">删除分组</button>
+              </form>
+            </div>
+          </article>
+        <% }) %>
+        <% if (!groups.length) { %>
+          <article class="account"><p class="muted">暂无分组，请先创建</p></article>
+        <% } %>
+      </div>
+    </section>
+  </body>
+</html>

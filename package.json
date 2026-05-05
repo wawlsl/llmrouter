@@ -1,0 +1,26 @@
+{
+  "name": "responses-pool-gateway",
+  "version": "1.0.0",
+  "description": "Visual admin gateway for OpenAI v1/responses account pools",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "NODE_ENV=development node src/server.js",
+    "boot": "sh scripts/server.sh start",
+    "stop": "sh scripts/server.sh stop",
+    "status": "sh scripts/server.sh status",
+    "logs": "sh scripts/server.sh logs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ejs": "^3.1.10",
+    "express": "^4.21.2",
+    "morgan": "^1.10.0"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.10.0"
+  }
+}

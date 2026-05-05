@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>缓存网关 - Responses Gateway</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/layui@2.9.18/dist/css/layui.css" />
+    <link rel="stylesheet" href="/public/style.css" />
+  </head>
+  <body>
+    <%- include('partials/admin_nav', { activePage, stats, notice }) %>
+
+    <section class="card layui-panel">
+      <div class="log-head">
+        <h2>PromptCache 命中率</h2>
+      </div>
+      <p class="muted">按“分组池”里开启缓存中间层的分组展示运行状态，数据来自缓存网关的 <code>/health</code> 与 <code>/v1/stats</code>。</p>
+      <div class="grid stats">
+        <article class="card">
+          <h3>启用分组</h3>
+          <p><%= summary.enabledGroups %></p>
+        </article>
+        <article class="card">
+          <h3>总请求（命中+未命中）</h3>
+          <p><%= Number(summary.totalRequests || 0).toLocaleString('zh-CN') %></p>
+        </article>
+        <article class="card">
+          <h3>总命中</h3>
+          <p><%= Number(summary.totalHits || 0).toLocaleString('zh-CN') %></p>
+        </article>
+        <article class="card">
+          <h3>总未命中</h3>
+          <p><%= Number(summary.totalMisses || 0).toLocaleString('zh-CN') %></p>
+        </article>
+        <article class="card">
+          <h3>综合命中率</h3>
+          <p><%= ((summary.totalHitRate || 0) * 100).toFixed(2) %>%</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="card layui-panel">
+      <h2>分组缓存运行时</h2>
+      <div class="table-wrap">
+        <table class="layui-table">
+          <thead>
+            <tr>
+              <th>分组</th>
+              <th>组Key</th>
+              <th>缓存地址</th>
+              <th>健康</th>
+              <th>命中</th>
+              <th>未命中</th>
+              <th>总请求</th>
+              <th>命中率</th>
+              <th>状态详情</th>
+            </tr>
+          </thead>
+          <tbody>
+            <% runtimes.forEach((item) => { %>
+              <tr>
+                <td><%= item.groupName %></td>
+                <td><code><%= item.groupKey %></code></td>
+                <td><code><%= item.baseUrl || '-' %></code></td>
+                <td>
+                  <% if (item.healthy) { %>
+                    <span class="pill log-ok">OK</span>
+                  <% } else { %>
+                    <span class="pill log-error">FAIL</span>
+                  <% } %>
+                </td>
+                <td><%= Number(item.stats.hits || 0).toLocaleString('zh-CN') %></td>
+                <td><%= Number(item.stats.misses || 0).toLocaleString('zh-CN') %></td>
+                <td><%= Number(item.stats.total || 0).toLocaleString('zh-CN') %></td>
+                <td><%= ((item.stats.hitRate || 0) * 100).toFixed(2) %>%</td>
+                <td class="muted"><%= item.healthDetail || '-' %></td>
+              </tr>
+            <% }) %>
+            <% if (!runtimes.length) { %>
+              <tr>
+                <td colspan="9" class="muted">当前没有启用缓存中间层的分组。请到“分组池”开启。</td>
+              </tr>
+            <% } %>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </body>
+</html>

@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>账号池 - Responses Gateway</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/layui@2.9.18/dist/css/layui.css" />
+    <link rel="stylesheet" href="/public/style.css" />
+  </head>
+  <body>
+    <%- include('partials/admin_nav', { activePage, stats, notice }) %>
+
+    <section class="page-grid">
+      <article class="card">
+        <h2>添加账号</h2>
+        <form method="post" action="/admin/accounts" class="inline-form">
+          <label>账号名称</label>
+          <input name="name" placeholder="team-a" required />
+
+          <label>API Key</label>
+          <input name="apiKey" placeholder="sk-..." required />
+
+          <label>供应商</label>
+          <select name="provider">
+            <option value="openai" selected>OpenAI / 兼容 OpenAI 接口</option>
+            <option value="anthropic">Claude / Anthropic</option>
+          </select>
+          <label class="checkline"><input name="forceResponsesCompat" type="checkbox" /> Responses 强制兼容转换(/v1/responses -> /v1/chat/completions)</label>
+
+          <label>Base URL</label>
+          <input name="baseUrl" value="<%= settings.defaultBaseUrl %>" required />
+
+          <label>权重</label>
+          <input name="weight" type="number" min="1" value="1" required />
+
+          <label>账号总额度(请求,0=不限)</label>
+          <input name="quotaLimit" type="number" min="0" value="0" required />
+
+          <label>短窗额度周期</label>
+          <div class="inline">
+            <input name="quotaWindowValue" type="number" min="1" value="5" required />
+            <select name="quotaWindowUnit">
+              <option value="hour">小时</option>
+              <option value="day">天</option>
+              <option value="week">周</option>
+            </select>
+          </div>
+
+          <label>长窗额度(请求,0=不限)</label>
+          <input name="quotaLimit2" type="number" min="0" value="0" required />
+
+          <label>长窗额度周期</label>
+          <div class="inline">
+            <input name="quotaWindowValue2" type="number" min="1" value="1" required />
+            <select name="quotaWindowUnit2">
+              <option value="week">周</option>
+              <option value="day">天</option>
+              <option value="hour">小时</option>
+            </select>
+          </div>
+
+          <label>账号 Sticky(分钟,0=全局)</label>
+          <input name="stickyWindowMinutes" type="number" min="0" value="0" required />
+
+          <label>创建时附加模型(逗号/换行分隔)</label>
+          <textarea name="customModels" rows="3" placeholder="gpt-5.5&#10;gpt-5-mini"></textarea>
+
+          <label>创建后加入分组(可选)</label>
+          <select name="groupId">
+            <option value="">不加入分组</option>
+            <% groups.forEach((group) => { %>
+              <option value="<%= group.id %>"><%= group.name %> (<%= group.groupKey %>)</option>
+            <% }) %>
+          </select>
+
+          <label>分组权重</label>
+          <input name="groupWeight" type="number" min="1" value="1" />
+
+          <label class="checkline"><input name="syncModelsAfterCreate" type="checkbox" checked /> 创建后自动拉取 /v1/models</label>
+          <label class="checkline"><input name="enabled" type="checkbox" checked /> 启用</label>
+
+          <button type="submit">创建账号</button>
+        </form>
+      </article>
+
+      <article class="card">
+        <h2>账号池</h2>
+        <p class="muted">默认只展示概要，点击“管理账号”弹窗进行详细配置。</p>
+
+        <% if (!accounts.length) { %>
+          <p class="muted">暂无账号</p>
+        <% } %>
+
+        <div class="account-list">
+          <% accounts.forEach((account) => { %>
+            <article class="account-item <%= account.enabled ? '' : 'disabled' %>">
+              <div class="account-head">
+                <div>
+                  <h3><%= account.name %> <small>(<%= account.enabled ? '启用' : '停用' %>)</small></h3>
+                  <p class="muted">供应商: <%= account.providerLabel %></p>
+                  <p class="muted">Responses兼容: <%= account.forceResponsesCompat ? '开启' : '关闭' %></p>
+                  <p class="muted">Key: <code><%= account.maskedKey %></code></p>
+                  <p class="muted">分组: <%= account.memberships.length ? account.memberships.map((item) => `${item.groupName}(${item.weight})`).join(', ') : '-' %></p>
+                </div>
+                <div class="kpi-pills">
+                  <span class="pill">短窗 <%= account.stats.usedRequests %> / <%= account.quotaLimit > 0 ? account.quotaLimit : '∞' %></span>
+                  <span class="pill">长窗 <%= account.stats.usedRequests2 || 0 %> / <%= account.quotaLimit2 > 0 ? account.quotaLimit2 : '∞' %></span>
+                  <span class="pill">累计 <%= account.stats.totalRequests %></span>
+                </div>
+              </div>
+              <p class="muted">短窗重置: <%= account.quotaResetAt || '-' %> · 长窗重置: <%= account.quotaResetAt2 || '-' %></p>
+              <div class="actions">
+                <button type="button" class="open-modal" data-target="account-modal-<%= account.id %>">管理账号</button>
+                <form method="post" action="/admin/accounts/<%= account.id %>/copy">
+                  <button class="ghost" type="submit">复制账号</button>
+                </form>
+                <form method="post" action="/admin/accounts/<%= account.id %>/reset">
+                  <button class="ghost" type="submit">重置额度</button>
+                </form>
+              </div>
+            </article>
+
+            <dialog id="account-modal-<%= account.id %>" class="account-modal">
+              <article class="modal-shell">
+                <header class="modal-header">
+                  <div>
+                    <h3><%= account.name %> 管理</h3>
+                    <p class="muted">最后使用: <%= account.stats.lastUsedAt || '-' %></p>
+                  </div>
+                  <button type="button" class="ghost close-modal">关闭</button>
+                </header>
+
+                <section class="subcard">
+                  <h4>基础配置</h4>
+                  <form method="post" action="/admin/accounts/<%= account.id %>/update" class="inline-form compact">
+                    <label>名称</label>
+                    <input name="name" value="<%= account.name %>" required />
+
+                    <label>API Key (留空=不修改)</label>
+                    <input name="apiKey" placeholder="不改可留空" />
+
+                    <label>供应商</label>
+                    <select name="provider">
+                      <option value="openai" <%= (account.provider || 'openai') === 'openai' ? 'selected' : '' %>>OpenAI / 兼容 OpenAI 接口</option>
+                      <option value="anthropic" <%= (account.provider || 'openai') === 'anthropic' ? 'selected' : '' %>>Claude / Anthropic</option>
+                    </select>
+                    <label class="checkline"><input name="forceResponsesCompat" type="checkbox" <%= account.forceResponsesCompat ? 'checked' : '' %> /> Responses 强制兼容转换(/v1/responses -> /v1/chat/completions)</label>
+
+                    <label>Base URL</label>
+                    <input name="baseUrl" value="<%= account.baseUrl %>" required />
+
+                    <label>权重</label>
+                    <input name="weight" type="number" min="1" value="<%= account.weight %>" required />
+
+                    <label>账号总额度(请求,0=不限)</label>
+                    <input name="quotaLimit" type="number" min="0" value="<%= account.quotaLimit %>" required />
+
+                    <label>短窗额度周期</label>
+                    <div class="inline">
+                      <input name="quotaWindowValue" type="number" min="1" value="<%= (account.quotaDuration && account.quotaDuration.value) || 5 %>" required />
+                      <select name="quotaWindowUnit">
+                        <option value="hour" <%= ((account.quotaDuration && account.quotaDuration.unit) || 'hour') === 'hour' ? 'selected' : '' %>>小时</option>
+                        <option value="day" <%= ((account.quotaDuration && account.quotaDuration.unit) || 'hour') === 'day' ? 'selected' : '' %>>天</option>
+                        <option value="week" <%= ((account.quotaDuration && account.quotaDuration.unit) || 'hour') === 'week' ? 'selected' : '' %>>周</option>
+                        <option value="minute" <%= ((account.quotaDuration && account.quotaDuration.unit) || 'hour') === 'minute' ? 'selected' : '' %>>分钟</option>
+                      </select>
+                    </div>
+
+                    <label>长窗额度(请求,0=不限)</label>
+                    <input name="quotaLimit2" type="number" min="0" value="<%= account.quotaLimit2 || 0 %>" required />
+
+                    <label>长窗额度周期</label>
+                    <div class="inline">
+                      <input name="quotaWindowValue2" type="number" min="1" value="<%= (account.quotaDuration2 && account.quotaDuration2.value) || 1 %>" required />
+                      <select name="quotaWindowUnit2">
+                        <option value="week" <%= ((account.quotaDuration2 && account.quotaDuration2.unit) || 'week') === 'week' ? 'selected' : '' %>>周</option>
+                        <option value="day" <%= ((account.quotaDuration2 && account.quotaDuration2.unit) || 'week') === 'day' ? 'selected' : '' %>>天</option>
+                        <option value="hour" <%= ((account.quotaDuration2 && account.quotaDuration2.unit) || 'week') === 'hour' ? 'selected' : '' %>>小时</option>
+                        <option value="minute" <%= ((account.quotaDuration2 && account.quotaDuration2.unit) || 'week') === 'minute' ? 'selected' : '' %>>分钟</option>
+                      </select>
+                    </div>
+
+                    <label>账号 Sticky(分钟,0=全局)</label>
+                    <input name="stickyWindowMinutes" type="number" min="0" value="<%= account.stickyMinutes %>" required />
+
+                    <label class="checkline"><input name="enabled" type="checkbox" <%= account.enabled ? 'checked' : '' %> /> 启用</label>
+                    <div class="actions">
+                      <button type="submit">保存账号</button>
+                    </div>
+                  </form>
+                </section>
+
+                <section class="subcard">
+                  <h4>模型列表</h4>
+                  <div class="actions">
+                    <form method="post" action="/admin/accounts/<%= account.id %>/models/sync">
+                      <button class="ghost" type="submit">拉取 /v1/models</button>
+                    </form>
+                  </div>
+                  <form method="post" action="/admin/accounts/<%= account.id %>/models/replace" class="inline-form compact">
+                    <label>批量编辑模型(换行/逗号分隔, 保存时覆盖)</label>
+                    <textarea name="modelNamesText" rows="5" placeholder="gpt-5.5&#10;gpt-5-mini"><%= account.models.map((item) => item.modelName).join('\n') %></textarea>
+                    <button type="submit">保存模型列表</button>
+                  </form>
+                  <div class="chips">
+                    <% account.models.forEach((model) => { %>
+                      <span class="chip"><%= model.modelName %> <small>[<%= model.source %>]</small></span>
+                    <% }) %>
+                    <% if (!account.models.length) { %><span class="muted">未配置（默认允许所有模型）</span><% } %>
+                  </div>
+                </section>
+
+                <section class="subcard">
+                  <h4>模型额度</h4>
+                  <form method="post" action="/admin/accounts/<%= account.id %>/quotas/upsert" class="inline-form compact">
+                    <label>模型名</label>
+                    <input name="modelName" placeholder="gpt-5.5" required />
+                    <label>请求额度(0=不限)</label>
+                    <input name="requestLimit" type="number" min="0" value="0" required />
+                    <label>Token额度(0=不限)</label>
+                    <input name="tokenLimit" type="number" min="0" value="0" required />
+                    <label>费用额度(0=不限)</label>
+                    <input name="costLimit" type="number" min="0" step="0.01" value="0" required />
+                    <label>货币</label>
+                    <input name="currency" value="<%= settings.defaultCurrency %>" required />
+                    <label>额度周期</label>
+                    <div class="inline">
+                      <input name="windowValue" type="number" min="1" value="5" required />
+                      <select name="windowUnit">
+                        <option value="hour">小时</option>
+                        <option value="day">天</option>
+                        <option value="week">周</option>
+                        <option value="minute">分钟</option>
+                      </select>
+                    </div>
+                    <button type="submit">保存模型额度</button>
+                  </form>
+
+                  <div class="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>模型</th>
+                          <th>请求</th>
+                          <th>Token</th>
+                          <th>费用</th>
+                          <th>重置时间</th>
+                          <th>操作</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <% account.modelQuotas.forEach((quota) => { %>
+                          <tr>
+                            <td><code><%= quota.modelName %></code></td>
+                            <td><%= quota.usedRequests %> / <%= quota.requestLimit > 0 ? quota.requestLimit : '∞' %></td>
+                            <td><%= quota.usedTokens %> / <%= quota.tokenLimit > 0 ? quota.tokenLimit : '∞' %></td>
+                            <td><%= quota.usedCostMajor %> / <%= quota.hasCostLimit ? quota.costLimitMajor : '∞' %> <%= quota.currency %></td>
+                            <td><%= quota.resetAt || '-' %></td>
+                            <td class="actions">
+                              <form method="post" action="/admin/accounts/<%= account.id %>/quotas/reset">
+                                <input type="hidden" name="modelName" value="<%= quota.modelName %>" />
+                                <button class="ghost" type="submit">重置</button>
+                              </form>
+                              <form method="post" action="/admin/accounts/<%= account.id %>/quotas/delete">
+                                <input type="hidden" name="modelName" value="<%= quota.modelName %>" />
+                                <button class="danger" type="submit">删除</button>
+                              </form>
+                            </td>
+                          </tr>
+                        <% }) %>
+                        <% if (!account.modelQuotas.length) { %>
+                          <tr>
+                            <td colspan="6" class="muted">暂无模型额度配置</td>
+                          </tr>
+                        <% } %>
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+
+                <section class="actions">
+                  <form method="post" action="/admin/accounts/<%= account.id %>/delete" onsubmit="return confirm('确认删除账号?')">
+                    <button class="danger" type="submit">删除账号</button>
+                  </form>
+                </section>
+              </article>
+            </dialog>
+          <% }) %>
+        </div>
+      </article>
+    </section>
+
+    <script>
+      (function () {
+        const openButtons = document.querySelectorAll('.open-modal');
+        const closeButtons = document.querySelectorAll('.close-modal');
+
+        for (const button of openButtons) {
+          button.addEventListener('click', function () {
+            const targetId = button.getAttribute('data-target');
+            const dialog = targetId ? document.getElementById(targetId) : null;
+            if (dialog && typeof dialog.showModal === 'function') {
+              dialog.showModal();
+            }
+          });
+        }
+
+        for (const button of closeButtons) {
+          button.addEventListener('click', function () {
+            const dialog = button.closest('dialog');
+            if (dialog) {
+              dialog.close();
+            }
+          });
+        }
+
+        const dialogs = document.querySelectorAll('.account-modal');
+        for (const dialog of dialogs) {
+          dialog.addEventListener('click', function (event) {
+            const rect = dialog.getBoundingClientRect();
+            const inDialog = (
+              event.clientX >= rect.left &&
+              event.clientX <= rect.right &&
+              event.clientY >= rect.top &&
+              event.clientY <= rect.bottom
+            );
+            if (!inDialog) {
+              dialog.close();
+            }
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>

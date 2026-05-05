@@ -1,0 +1,42 @@
+<header class="topbar">
+  <h1>Responses Gateway 控制台</h1>
+  <form method="post" action="/admin/logout">
+    <button class="ghost layui-btn layui-btn-primary layui-btn-sm" type="submit">退出</button>
+  </form>
+</header>
+
+<nav class="tabs card layui-panel">
+  <a class="tab <%= activePage === 'accounts' ? 'active' : '' %>" href="/admin/accounts">账号池</a>
+  <a class="tab <%= activePage === 'groups' ? 'active' : '' %>" href="/admin/groups">分组池</a>
+  <a class="tab <%= activePage === 'keys' ? 'active' : '' %>" href="/admin/keys">分组Key</a>
+  <a class="tab <%= activePage === 'cache' ? 'active' : '' %>" href="/admin/cache">缓存网关</a>
+  <a class="tab <%= activePage === 'mappings' ? 'active' : '' %>" href="/admin/mappings">模型映射</a>
+  <a class="tab <%= activePage === 'pricing' ? 'active' : '' %>" href="/admin/pricing">模型价格</a>
+  <a class="tab <%= activePage === 'logs' ? 'active' : '' %>" href="/admin/logs">实时日志</a>
+  <a class="tab <%= activePage === 'settings' ? 'active' : '' %>" href="/admin/settings">全局设置</a>
+</nav>
+
+<% if (notice) { %>
+  <div class="notice"><%= notice %></div>
+<% } %>
+
+<section class="grid stats">
+  <article class="card"><h3>账号总数</h3><p><%= stats.accountCount %></p></article>
+  <article class="card"><h3>启用账号</h3><p><%= stats.activeCount %></p></article>
+  <article class="card"><h3>Sticky映射</h3><p><%= stats.stickyCount %></p></article>
+  <article class="card">
+    <h3>缓存命中率</h3>
+    <p><%= ((stats.cacheHitRate || 0) * 100).toFixed(2) %>%</p>
+    <small class="muted">今日缓存输入Token: <%= Number(stats.todayCachedTokens || 0).toLocaleString('zh-CN') %></small>
+  </article>
+  <article class="card">
+    <h3>今日输入Token</h3>
+    <p><%= Number(stats.todayInputTokens || 0).toLocaleString('zh-CN') %></p>
+    <small class="muted">今日输出Token: <%= Number(stats.todayOutputTokens || 0).toLocaleString('zh-CN') %></small>
+  </article>
+  <article class="card">
+    <h3>今日总Token</h3>
+    <p><%= Number(stats.todayTotalTokens || 0).toLocaleString('zh-CN') %></p>
+    <small class="muted">Sticky命中率: <%= ((stats.stickyHitRate || 0) * 100).toFixed(2) %>%</small>
+  </article>
+</section>

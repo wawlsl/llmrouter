@@ -1,0 +1,16 @@
+node_modules/
+.external/
+.tmpcheck/
+data/
+gw.log
+.gateway.pid
+*.db
+*.sqlite
+*.sqlite3
+*.pid
+*.log
+.env
+.env.*
+1.77
+1.77.pub
+1.bbx

@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>实时日志 - Responses Gateway</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/layui@2.9.18/dist/css/layui.css" />
+    <link rel="stylesheet" href="/public/style.css" />
+  </head>
+  <body>
+    <%- include('partials/admin_nav', { activePage, stats, notice }) %>
+
+    <section class="card">
+      <div class="log-head">
+        <h2>实时请求日志</h2>
+        <div class="kpi-pills">
+          <span id="streamState" class="pill pill-warn">连接中</span>
+          <button id="clearRows" type="button" class="ghost">清空当前列表</button>
+        </div>
+      </div>
+      <p class="muted">仅展示推理类请求（已过滤模型拉取/count_tokens），并显示具体命中端点（最近 300 条内存日志）。</p>
+
+      <div class="table-wrap">
+        <table id="logsTable">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>状态</th>
+              <th>端点</th>
+              <th>Provider</th>
+              <th>命中分组</th>
+              <th>命中账号</th>
+              <th>模型</th>
+              <th>尝试/切换</th>
+              <th>重试原因</th>
+              <th>Compat告警</th>
+              <th>Token</th>
+              <th>费用</th>
+              <th>耗时</th>
+              <th>错误详情</th>
+            </tr>
+          </thead>
+          <tbody id="logsBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <script>
+      (() => {
+        const initialLogs = <%- JSON.stringify(logs || []) %>;
+        const logsBody = document.getElementById('logsBody');
+        const streamState = document.getElementById('streamState');
+        const clearRows = document.getElementById('clearRows');
+
+        const maxRows = 200;
+
+        const escapeHtml = (text) => String(text || '')
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;')
+          .replaceAll("'", '&#39;');
+
+        const formatCost = (minor, currency) => {
+          const curr = String(currency || 'USD').toUpperCase();
+          const value = Number(minor || 0);
+          if (!Number.isFinite(value) || value <= 0) {
+            return `0 ${curr}`;
+          }
+          const factor = curr === 'JPY' ? 1 : 100;
+          return `${(value / factor).toFixed(factor === 1 ? 0 : 2)} ${curr}`;
+        };
+
+        const statusClass = (statusCode) => {
+          const code = Number(statusCode || 0);
+          if (code >= 200 && code < 300) return 'log-ok';
+          if (code >= 400) return 'log-error';
+          return 'log-warn';
+        };
+
+        const toLocalTime = (iso) => {
+          if (!iso) return '-';
+          const date = new Date(iso);
+          if (Number.isNaN(date.getTime())) return iso;
+          return date.toLocaleString();
+        };
+
+        const renderRow = (entry, prepend = true) => {
+          const row = document.createElement('tr');
+          row.innerHTML = `
+            <td data-label="时间">${escapeHtml(toLocalTime(entry.at))}</td>
+            <td data-label="状态"><span class="pill ${statusClass(entry.statusCode)}">${escapeHtml(entry.statusCode)}</span></td>
+            <td data-label="端点"><code>${escapeHtml(entry.endpoint || `${entry.method || '-'} ${entry.path || '-'}`)}</code></td>
+            <td data-label="Provider"><code>${escapeHtml(entry.provider || '-')}</code></td>
+            <td data-label="命中分组"><code>${escapeHtml(entry.groupKey || '-')}</code></td>
+            <td data-label="命中账号"><code>${escapeHtml(entry.account || '-')}</code></td>
+            <td data-label="模型"><code>${escapeHtml(entry.model || '-')}</code></td>
+            <td data-label="尝试/切换">${escapeHtml(`${entry.attempts || 1} / ${entry.switches || 0}`)}</td>
+            <td data-label="重试原因" class="log-error-text">${escapeHtml(entry.retryReason || '-')}</td>
+            <td data-label="Compat告警" class="log-error-text"><code>${escapeHtml(entry.compatUnsupported || '-')}</code></td>
+            <td data-label="Token">${escapeHtml(entry.tokens || 0)}</td>
+            <td data-label="费用">${escapeHtml(formatCost(entry.costMinor, entry.currency))}</td>
+            <td data-label="耗时">${escapeHtml(`${entry.durationMs || 0}ms`)}</td>
+            <td data-label="错误详情" class="log-error-text">${escapeHtml(entry.error || '-')}</td>
+          `;
+          if (prepend) {
+            logsBody.prepend(row);
+          } else {
+            logsBody.append(row);
+          }
+          while (logsBody.children.length > maxRows) {
+            logsBody.removeChild(logsBody.lastElementChild);
+          }
+        };
+
+        initialLogs.forEach((entry) => renderRow(entry, false));
+
+        clearRows.addEventListener('click', () => {
+          logsBody.innerHTML = '';
+        });
+
+        const setState = (text, cls) => {
+          streamState.textContent = text;
+          streamState.classList.remove('log-ok', 'log-error', 'log-warn');
+          streamState.classList.add(cls);
+        };
+
+        setState('连接中', 'log-warn');
+        const es = new EventSource('/admin/logs/stream');
+        es.onopen = () => setState('已连接', 'log-ok');
+        es.onmessage = (event) => {
+          try {
+            const entry = JSON.parse(event.data);
+            renderRow(entry, true);
+          } catch {
+            // ignore malformed message
+          }
+        };
+        es.onerror = () => {
+          setState('重连中', 'log-error');
+        };
+      })();
+    </script>
+  </body>
+</html>

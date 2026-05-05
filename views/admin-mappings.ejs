@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>模型映射 - Responses Gateway</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/layui@2.9.18/dist/css/layui.css" />
+    <link rel="stylesheet" href="/public/style.css" />
+  </head>
+  <body>
+    <%- include('partials/admin_nav', { activePage, stats, notice }) %>
+
+    <section class="card">
+      <h2>模型映射 (客户端模型 -> 上游模型)</h2>
+      <form method="post" action="/admin/mappings/upsert" class="inline-form">
+        <label>源模型</label>
+        <input name="sourceModel" placeholder="gpt-4.1" required />
+        <label>目标模型</label>
+        <input name="targetModel" placeholder="gpt-5.5" required />
+        <button type="submit">新增/更新映射</button>
+      </form>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>源模型</th>
+              <th>目标模型</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <% mappings.forEach((mapping) => { %>
+              <tr>
+                <td><code><%= mapping.sourceModel %></code></td>
+                <td><code><%= mapping.targetModel %></code></td>
+                <td>
+                  <form method="post" action="/admin/mappings/delete">
+                    <input type="hidden" name="sourceModel" value="<%= mapping.sourceModel %>" />
+                    <button class="danger" type="submit">删除</button>
+                  </form>
+                </td>
+              </tr>
+            <% }) %>
+            <% if (!mappings.length) { %>
+              <tr><td colspan="3" class="muted">暂无映射配置</td></tr>
+            <% } %>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </body>
+</html>

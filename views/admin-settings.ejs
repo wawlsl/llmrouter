@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>全局设置 - Responses Gateway</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/layui@2.9.18/dist/css/layui.css" />
+    <link rel="stylesheet" href="/public/style.css" />
+  </head>
+  <body>
+    <%- include('partials/admin_nav', { activePage, stats, notice }) %>
+
+    <section class="card">
+      <h2>全局设置</h2>
+      <form method="post" action="/admin/settings" class="inline-form">
+        <label>默认上游Base URL</label>
+        <input name="defaultBaseUrl" value="<%= settings.defaultBaseUrl %>" required />
+
+        <label>默认货币</label>
+        <input name="defaultCurrency" value="<%= settings.defaultCurrency %>" placeholder="USD/CNY" required />
+
+        <label>全局 Sticky 时间窗口</label>
+        <div class="inline">
+          <input name="globalStickyValue" type="number" min="1" value="<%= stickyDuration.value %>" required />
+          <select name="globalStickyUnit">
+            <option value="hour" <%= stickyDuration.unit === 'hour' ? 'selected' : '' %>>小时</option>
+            <option value="day" <%= stickyDuration.unit === 'day' ? 'selected' : '' %>>天</option>
+            <option value="week" <%= stickyDuration.unit === 'week' ? 'selected' : '' %>>周</option>
+            <option value="minute" <%= stickyDuration.unit === 'minute' ? 'selected' : '' %>>分钟</option>
+          </select>
+        </div>
+
+        <label>后台登录会话时长</label>
+        <div class="inline">
+          <input name="sessionTtlValue" type="number" min="1" value="<%= sessionDuration.value %>" required />
+          <select name="sessionTtlUnit">
+            <option value="day" <%= sessionDuration.unit === 'day' ? 'selected' : '' %>>天</option>
+            <option value="hour" <%= sessionDuration.unit === 'hour' ? 'selected' : '' %>>小时</option>
+            <option value="week" <%= sessionDuration.unit === 'week' ? 'selected' : '' %>>周</option>
+            <option value="minute" <%= sessionDuration.unit === 'minute' ? 'selected' : '' %>>分钟</option>
+          </select>
+        </div>
+
+        <button type="submit">保存全局设置</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>管理员密码</h2>
+      <form method="post" action="/admin/settings/password" class="inline-form">
+        <label>当前密码</label>
+        <input name="currentPassword" type="password" required />
+
+        <label>新密码 (至少8位)</label>
+        <input name="newPassword" type="password" minlength="8" required />
+
+        <label>确认新密码</label>
+        <input name="confirmPassword" type="password" minlength="8" required />
+
+        <button type="submit">修改密码</button>
+      </form>
+    </section>
+  </body>
+</html>
