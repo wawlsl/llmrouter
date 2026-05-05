@@ -601,7 +601,7 @@ th {
 
 @media (max-width: 900px) {
   body.admin-layout {
-    padding: 76px 10px 14px;
+    padding: 10px 10px 14px;
   }
 
   .admin-sidebar {
@@ -626,9 +626,13 @@ th {
   }
 
   .topbar {
-    left: 0;
-    right: 0;
-    padding: 8px 10px 0;
+    position: sticky;
+    top: 0;
+    left: auto;
+    right: auto;
+    padding: 0 0 10px;
+    z-index: 48;
+    background: var(--bg);
   }
 
   .sidebar-toggle {
@@ -641,6 +645,10 @@ th {
 
   .topbar .muted {
     font-size: 12px;
+  }
+
+  .topbar .kpi-pills {
+    display: none;
   }
 
   .quick-stats {
