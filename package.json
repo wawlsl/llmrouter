@@ -10,7 +10,11 @@
     "boot": "sh scripts/server.sh start",
     "stop": "sh scripts/server.sh stop",
     "status": "sh scripts/server.sh status",
-    "logs": "sh scripts/server.sh logs"
+    "logs": "sh scripts/server.sh logs",
+    "cache:boot": "sh scripts/cache-server.sh start",
+    "cache:stop": "sh scripts/cache-server.sh stop",
+    "cache:status": "sh scripts/cache-server.sh status",
+    "cache:logs": "sh scripts/cache-server.sh logs"
   },
   "engines": {
     "node": ">=20"

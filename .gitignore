@@ -1,9 +1,16 @@
 node_modules/
 .external/
+!services/
+!services/prompt-cache/
+!services/prompt-cache/**
 .tmpcheck/
 data/
+!data/promptcache/
+!data/promptcache/.gitkeep
 gw.log
 .gateway.pid
+promptcache.log
+.promptcache.pid
 *.db
 *.sqlite
 *.sqlite3

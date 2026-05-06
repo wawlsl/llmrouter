@@ -12,6 +12,13 @@
 - 货币单位配置（默认 `USD`，可改为 `CNY/JPY` 等）
 - Sticky 路由（同一请求窗口内尽量固定账号，提升缓存命中）
 
+## 0) 仓库结构（单仓）
+
+- 网关服务（Node.js）：`src/`、`views/`、`public/`
+- 缓存服务（Go / PromptCache）：`services/prompt-cache/`
+- 网关数据库：`data/gateway.db`
+- 缓存数据目录（默认）：`data/promptcache/`
+
 ## 1) 运行
 
 要求：`Node.js 20+`（SQLite 双兼容）
@@ -39,6 +46,42 @@ npm run stop
 ```
 
 后台地址：`http://127.0.0.1:3000/admin/login`
+
+### 启动缓存服务（PromptCache）
+
+```bash
+npm run cache:boot
+npm run cache:status
+npm run cache:logs
+```
+
+停止缓存服务：
+
+```bash
+npm run cache:stop
+```
+
+默认缓存监听和存储：
+
+- 监听端口：`8080`
+- 缓存存储目录：`data/promptcache`
+- 启动脚本：`scripts/cache-server.sh`
+
+可通过环境变量覆盖：
+
+- `CACHE_PORT`
+- `CACHE_STORAGE_PATH`
+- `CACHE_AUTH_TOKEN`
+- `CACHE_EMBEDDING_PROVIDER`
+- `CACHE_OPENAI_BASE_URL`
+- `CACHE_OPENAI_EMBED_MODEL`
+- `CACHE_OPENAI_VERIFY_MODEL`
+
+缓存服务上游密钥（按所选 provider）：
+
+- `OPENAI_API_KEY`（`CACHE_EMBEDDING_PROVIDER=openai` 时必填）
+- `MISTRAL_API_KEY`（`CACHE_EMBEDDING_PROVIDER=mistral` 时必填）
+- `ANTHROPIC_API_KEY` + `VOYAGE_API_KEY`（`CACHE_EMBEDDING_PROVIDER=claude` 时必填）
 
 默认管理员：
 

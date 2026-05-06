@@ -1,0 +1,8 @@
+source "https://rubygems.org"
+
+# GitHub Pages gem includes Jekyll and dependencies
+gem "github-pages", "~> 232", group: :jekyll_plugins
+
+# Remote theme support (included in github-pages)
+gem "jekyll-remote-theme"
+gem "jekyll-seo-tag"
