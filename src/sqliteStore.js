@@ -246,6 +246,36 @@ export function createStore(dbPath) {
     );
   `);
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS request_logs (
+      id TEXT PRIMARY KEY,
+      at TEXT NOT NULL,
+      method TEXT NOT NULL DEFAULT '',
+      path TEXT NOT NULL DEFAULT '',
+      endpoint TEXT NOT NULL DEFAULT '',
+      provider TEXT NOT NULL DEFAULT 'unknown',
+      account TEXT NOT NULL DEFAULT '-',
+      model TEXT NOT NULL DEFAULT '-',
+      request_model TEXT NOT NULL DEFAULT '-',
+      group_key TEXT NOT NULL DEFAULT '-',
+      access_key_id TEXT NOT NULL DEFAULT '-',
+      status_code INTEGER NOT NULL DEFAULT 0,
+      tokens INTEGER NOT NULL DEFAULT 0,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      cached_tokens INTEGER NOT NULL DEFAULT 0,
+      cost_minor INTEGER NOT NULL DEFAULT 0,
+      currency TEXT NOT NULL DEFAULT 'USD',
+      duration_ms INTEGER NOT NULL DEFAULT 0,
+      error TEXT NOT NULL DEFAULT '',
+      compat_unsupported TEXT NOT NULL DEFAULT '',
+      attempts INTEGER NOT NULL DEFAULT 1,
+      switches INTEGER NOT NULL DEFAULT 0,
+      retry_reason TEXT NOT NULL DEFAULT '',
+      sticky_hit INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+
   db.exec('CREATE INDEX IF NOT EXISTS idx_accounts_enabled ON accounts(enabled);');
   db.exec('CREATE INDEX IF NOT EXISTS idx_account_models_account ON account_models(account_id);');
   db.exec('CREATE INDEX IF NOT EXISTS idx_quotas_account ON account_model_quotas(account_id);');
@@ -255,6 +285,7 @@ export function createStore(dbPath) {
   db.exec('CREATE INDEX IF NOT EXISTS idx_access_keys_group ON access_keys(group_id);');
   db.exec('CREATE INDEX IF NOT EXISTS idx_sticky_expires ON sticky_bindings(expires_at);');
   db.exec('CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires ON admin_sessions(expires_at);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_request_logs_at ON request_logs(at DESC);');
 
   function ensureColumn(tableName, columnName, definitionSql) {
     const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
@@ -628,6 +659,55 @@ export function createStore(dbPath) {
   `);
   const deleteAdminSessionStmt = db.prepare('DELETE FROM admin_sessions WHERE token = ?');
   const deleteExpiredAdminSessionStmt = db.prepare('DELETE FROM admin_sessions WHERE expires_at <= ?');
+
+  const insertRequestLogStmt = db.prepare(`
+    INSERT INTO request_logs(
+      id, at, method, path, endpoint, provider, account, model, request_model,
+      group_key, access_key_id, status_code, tokens, input_tokens, output_tokens,
+      cached_tokens, cost_minor, currency, duration_ms, error, compat_unsupported,
+      attempts, switches, retry_reason, sticky_hit
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const listRecentRequestLogsStmt = db.prepare(`
+    SELECT
+      id,
+      at,
+      method,
+      path,
+      endpoint,
+      provider,
+      account,
+      model,
+      request_model,
+      group_key,
+      access_key_id,
+      status_code,
+      tokens,
+      input_tokens,
+      output_tokens,
+      cached_tokens,
+      cost_minor,
+      currency,
+      duration_ms,
+      error,
+      compat_unsupported,
+      attempts,
+      switches,
+      retry_reason,
+      sticky_hit
+    FROM request_logs
+    ORDER BY at DESC, id DESC
+    LIMIT ?
+  `);
+  const trimRequestLogsStmt = db.prepare(`
+    DELETE FROM request_logs
+    WHERE id IN (
+      SELECT id FROM request_logs
+      ORDER BY at DESC, id DESC
+      LIMIT -1 OFFSET ?
+    )
+  `);
 
   for (const [key, value] of Object.entries(defaultSettings)) {
     upsertSettingStmt.run(key, String(value));
@@ -1211,6 +1291,72 @@ export function createStore(dbPath) {
     deleteExpiredAdminSessionStmt.run(Math.floor(nowMs));
   }
 
+  function appendRequestLog(entry) {
+    insertRequestLogStmt.run(
+      entry.id,
+      entry.at,
+      entry.method || '',
+      entry.path || '',
+      entry.endpoint || '',
+      entry.provider || 'unknown',
+      entry.account || '-',
+      entry.model || '-',
+      entry.requestModel || '-',
+      entry.groupKey || '-',
+      entry.accessKeyId || '-',
+      Number(entry.statusCode) || 0,
+      Number(entry.tokens) || 0,
+      Number(entry.inputTokens) || 0,
+      Number(entry.outputTokens) || 0,
+      Number(entry.cachedTokens) || 0,
+      Number(entry.costMinor) || 0,
+      entry.currency || 'USD',
+      Number(entry.durationMs) || 0,
+      entry.error || '',
+      entry.compatUnsupported || '',
+      Number(entry.attempts) || 1,
+      Number(entry.switches) || 0,
+      entry.retryReason || '',
+      entry.stickyHit ? 1 : 0
+    );
+  }
+
+  function listRecentRequestLogs(limit = 120) {
+    const safeLimit = Math.max(Math.floor(Number(limit) || 120), 1);
+    return listRecentRequestLogsStmt.all(safeLimit).map((row) => ({
+      id: row.id,
+      at: row.at,
+      method: row.method,
+      path: row.path,
+      endpoint: row.endpoint,
+      provider: row.provider,
+      account: row.account,
+      model: row.model,
+      requestModel: row.request_model,
+      groupKey: row.group_key,
+      accessKeyId: row.access_key_id,
+      statusCode: row.status_code,
+      tokens: row.tokens,
+      inputTokens: row.input_tokens,
+      outputTokens: row.output_tokens,
+      cachedTokens: row.cached_tokens,
+      costMinor: row.cost_minor,
+      currency: row.currency,
+      durationMs: row.duration_ms,
+      error: row.error,
+      compatUnsupported: row.compat_unsupported,
+      attempts: row.attempts,
+      switches: row.switches,
+      retryReason: row.retry_reason,
+      stickyHit: row.sticky_hit === 1
+    }));
+  }
+
+  function trimRequestLogs(maxRows = 2000) {
+    const safeMax = Math.max(Math.floor(Number(maxRows) || 2000), 1);
+    trimRequestLogsStmt.run(safeMax);
+  }
+
   function listGroups() {
     return listGroupsStmt.all().map((row) => ({
       id: row.id,
@@ -1381,6 +1527,9 @@ export function createStore(dbPath) {
     setAdminSession,
     deleteAdminSession,
     cleanupExpiredAdminSessions,
+    appendRequestLog,
+    listRecentRequestLogs,
+    trimRequestLogs,
     close
   };
 }

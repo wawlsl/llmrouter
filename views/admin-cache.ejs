@@ -39,6 +39,21 @@
       </div>
     </section>
 
+    <section class="dashboard-grid cache-chart-grid">
+      <article class="card span-2">
+        <h3>分组命中率</h3>
+        <div id="cacheChartHitRate" class="chart-box chart-box-sm"></div>
+      </article>
+      <article class="card">
+        <h3>健康状态</h3>
+        <div id="cacheChartHealth" class="chart-box chart-box-sm"></div>
+      </article>
+      <article class="card span-3">
+        <h3>命中/未命中</h3>
+        <div id="cacheChartRequestMix" class="chart-box chart-box-sm"></div>
+      </article>
+    </section>
+
     <section class="card layui-panel">
       <h2>分组缓存运行时</h2>
       <div class="table-wrap">
@@ -85,5 +100,129 @@
         </table>
       </div>
     </section>
+
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+    <script>
+      (() => {
+        const charts = <%- JSON.stringify(charts || {}) %>;
+        if (!window.echarts) {
+          return;
+        }
+
+        const palette = ['#16baaa', '#3b82f6', '#f59e0b', '#f43f5e', '#64748b'];
+        const textStyle = { color: '#374151' };
+        const grid = { left: 44, right: 16, top: 36, bottom: 44, containLabel: true };
+        const instances = [];
+
+        const mount = (id) => {
+          const el = document.getElementById(id);
+          if (!el) {
+            return null;
+          }
+          const chart = echarts.init(el);
+          instances.push(chart);
+          return chart;
+        };
+
+        const hitRateChart = mount('cacheChartHitRate');
+        if (hitRateChart) {
+          hitRateChart.setOption({
+            color: ['#3b82f6'],
+            tooltip: { trigger: 'axis' },
+            grid,
+            xAxis: {
+              type: 'category',
+              data: charts.groupNames || [],
+              axisLabel: {
+                color: '#374151',
+                interval: 0,
+                rotate: 24
+              }
+            },
+            yAxis: {
+              type: 'value',
+              min: 0,
+              max: 100,
+              axisLabel: {
+                color: '#374151',
+                formatter: '{value}%'
+              }
+            },
+            series: [{
+              name: '命中率',
+              type: 'bar',
+              barMaxWidth: 30,
+              data: charts.groupHitRates || []
+            }]
+          });
+        }
+
+        const healthChart = mount('cacheChartHealth');
+        if (healthChart) {
+          healthChart.setOption({
+            color: ['#10b981', '#ef4444'],
+            tooltip: { trigger: 'item' },
+            legend: {
+              bottom: 0,
+              textStyle
+            },
+            series: [{
+              type: 'pie',
+              radius: ['46%', '72%'],
+              center: ['50%', '44%'],
+              itemStyle: { borderRadius: 6, borderColor: '#fff', borderWidth: 2 },
+              label: { formatter: '{b}: {d}%' },
+              data: charts.healthSeries || []
+            }]
+          });
+        }
+
+        const requestChart = mount('cacheChartRequestMix');
+        if (requestChart) {
+          requestChart.setOption({
+            color: palette,
+            tooltip: { trigger: 'axis' },
+            legend: {
+              data: ['命中', '未命中'],
+              textStyle
+            },
+            grid,
+            xAxis: {
+              type: 'category',
+              data: charts.groupNames || [],
+              axisLabel: {
+                color: '#374151',
+                interval: 0,
+                rotate: 24
+              }
+            },
+            yAxis: {
+              type: 'value',
+              axisLabel: textStyle
+            },
+            series: [
+              {
+                name: '命中',
+                type: 'bar',
+                stack: 'total',
+                barMaxWidth: 30,
+                data: charts.groupHits || []
+              },
+              {
+                name: '未命中',
+                type: 'bar',
+                stack: 'total',
+                barMaxWidth: 30,
+                data: charts.groupMisses || []
+              }
+            ]
+          });
+        }
+
+        window.addEventListener('resize', () => {
+          instances.forEach((chart) => chart.resize());
+        });
+      })();
+    </script>
   </body>
 </html>

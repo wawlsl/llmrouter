@@ -638,6 +638,14 @@ th {
   margin-top: 8px;
 }
 
+.chart-box-sm {
+  height: 260px;
+}
+
+.cache-chart-grid {
+  margin-bottom: 12px;
+}
+
 @media (max-width: 1100px) {
   .dashboard-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -687,7 +695,7 @@ th {
     top: 0;
     left: auto;
     right: auto;
-    padding: 0 0 10px;
+    padding: 0 0 8px;
     z-index: 48;
     background: var(--bg);
   }
@@ -702,6 +710,10 @@ th {
 
   .topbar .muted {
     font-size: 12px;
+  }
+
+  .topbar .layui-card-body {
+    padding: 8px 10px !important;
   }
 
   .topbar .kpi-pills {
@@ -727,6 +739,10 @@ th {
 
   .chart-box {
     height: 250px;
+  }
+
+  .chart-box-sm {
+    height: 220px;
   }
 
   .inline-form {
@@ -779,6 +795,15 @@ th {
   button {
     font-size: 16px;
     min-height: 40px;
+  }
+
+  .card {
+    padding: 10px;
+    margin-bottom: 10px;
+  }
+
+  .grid.stats {
+    gap: 8px;
   }
 }
 

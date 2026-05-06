@@ -35,10 +35,12 @@ const gatewayKeys = (process.env.GATEWAY_KEYS || '')
 
 const store = createStore(dbPath);
 let settings = store.getSettings();
-const requestLogBufferLimit = 300;
+const requestLogBufferLimit = 2000;
+const requestLogPersistLimit = 5000;
 const requestLogs = [];
 const requestLogClients = new Set();
 let requestLogSeq = 0;
+let requestLogPersistCounter = 0;
 const runtimeDailyStats = {
   dayKey: '',
   requestCount: 0,
@@ -377,6 +379,16 @@ function classifyUpstreamRetry(statusCode, payload, fallbackText = '') {
 }
 
 function publishRequestLog(entry) {
+  try {
+    store.appendRequestLog(entry);
+    requestLogPersistCounter += 1;
+    if (requestLogPersistCounter % 40 === 0) {
+      store.trimRequestLogs(requestLogPersistLimit);
+    }
+  } catch (error) {
+    console.warn('[request-log] persist failed:', error?.message || error);
+  }
+
   requestLogs.push(entry);
   if (requestLogs.length > requestLogBufferLimit) {
     requestLogs.splice(0, requestLogs.length - requestLogBufferLimit);
@@ -398,6 +410,29 @@ function publishRequestLog(entry) {
     }
   }
   updateRuntimeDailyStats(entry);
+}
+
+function resetRuntimeDailyStats() {
+  runtimeDailyStats.dayKey = '';
+  runtimeDailyStats.requestCount = 0;
+  runtimeDailyStats.stickyHitCount = 0;
+  runtimeDailyStats.inputTokens = 0;
+  runtimeDailyStats.outputTokens = 0;
+  runtimeDailyStats.cachedTokens = 0;
+  runtimeDailyStats.totalTokens = 0;
+}
+
+function hydrateRequestLogsFromStore() {
+  requestLogs.splice(0, requestLogs.length);
+  resetRuntimeDailyStats();
+
+  const persisted = store.listRecentRequestLogs(requestLogBufferLimit).reverse();
+  for (const entry of persisted) {
+    requestLogs.push(entry);
+    updateRuntimeDailyStats(entry);
+  }
+
+  store.trimRequestLogs(requestLogPersistLimit);
 }
 
 function currentLocalDayKey(now = new Date()) {
@@ -3774,6 +3809,7 @@ async function fetchPromptCacheGroupRuntime(group) {
 
 await migrateJsonConfigIfNeeded();
 ensureAdminPasswordSeed();
+hydrateRequestLogsFromStore();
 
 const app = express();
 app.set('view engine', 'ejs');
@@ -4238,12 +4274,33 @@ app.get('/admin/cache', adminOnly, async (req, res) => {
   const totalMisses = runtimes.reduce((sum, item) => sum + item.stats.misses, 0);
   const totalRequests = totalHits + totalMisses;
   const totalHitRate = totalRequests > 0 ? (totalHits / totalRequests) : 0;
+  const cacheRuntimeCharts = {
+    groupNames: runtimes.map((item) => item.groupName || item.groupKey || '-'),
+    groupHitRates: runtimes.map((item) => Number(((item.stats.hitRate || 0) * 100).toFixed(2))),
+    groupHits: runtimes.map((item) => Math.max(Number(item.stats.hits || 0), 0)),
+    groupMisses: runtimes.map((item) => Math.max(Number(item.stats.misses || 0), 0)),
+    healthSeries: [
+      {
+        name: '健康',
+        value: runtimes.filter((item) => item.healthy).length
+      },
+      {
+        name: '异常',
+        value: runtimes.filter((item) => !item.healthy).length
+      }
+    ],
+    requestSeries: [
+      { name: '命中', value: totalHits },
+      { name: '未命中', value: totalMisses }
+    ]
+  };
   res.render('admin-cache', {
     activePage: 'cache',
     settings,
     stats: buildAdminStats(accounts),
     notice: req.query.notice || '',
     runtimes,
+    charts: cacheRuntimeCharts,
     summary: {
       enabledGroups: cacheGroups.length,
       totalHits,
@@ -4821,7 +4878,7 @@ app.all('/v1/*', async (req, res) => {
     }
     logWritten = true;
     publishRequestLog({
-      id: `${Date.now()}-${(++requestLogSeq).toString(36)}`,
+      id: `${Date.now()}-${(++requestLogSeq).toString(36)}-${crypto.randomBytes(3).toString('hex')}`,
       at: new Date().toISOString(),
       method: req.method,
       path: req.path,

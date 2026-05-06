@@ -84,7 +84,7 @@ npm run stop
 
 - 基础配置：名称、供应商（`openai/anthropic`）、API Key、Base URL、权重、账号总额度
 - 可选开启“Responses 强制兼容转换”（按账号控制，适合仅支持 chat/completions 的 OpenAI 兼容上游）
-- Base URL 支持带路径前缀（如 `https://xxxx.ai/api/v1/llm`），网关会将 `/v1/*` 自动映射到该前缀下
+- Base URL 支持带路径前缀（如 `https://your-provider.example.com/api/v1/llm`），网关会将 `/v1/*` 自动映射到该前缀下
 - 创建时可选分组 + 分组权重
 - 支持一键复制账号（复制基础配置 + 模型列表 + 模型额度配置）
 - 创建账号时可直接：
