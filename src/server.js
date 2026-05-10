@@ -1773,6 +1773,13 @@ app.post('/admin/risk-control/settings', adminOnly, (req, res) => {
     }
     return String(req.body[key] || '').trim();
   };
+  const pickTextKeepCurrent = (key, fallback) => {
+    if (!hasOwn(key)) {
+      return String(fallback || '').trim();
+    }
+    const value = String(req.body[key] || '').trim();
+    return value || String(fallback || '').trim();
+  };
   const pickApiKey = (key, fallback) => {
     if (!hasOwn(key)) {
       return String(fallback || '').trim();
@@ -1833,17 +1840,17 @@ app.post('/admin/risk-control/settings', adminOnly, (req, res) => {
     riskControlQueueSize: String(Math.max(Math.min(Math.floor(pickNumberWhenMissing('riskControlQueueSize', currentSettings.riskControlQueueSize ?? 2000)), 50000), 50)),
     riskControlWorkerConcurrency: String(Math.max(Math.min(Math.floor(pickNumberWhenMissing('riskControlWorkerConcurrency', currentSettings.riskControlWorkerConcurrency ?? 2)), 12), 1)),
     riskControlRetentionDays: String(Math.max(Math.min(Math.floor(pickNumberWhenMissing('riskControlRetentionDays', currentSettings.riskControlRetentionDays ?? 30)), 3650), 1)),
-    riskControlBlockMessage: pickWhenMissing('riskControlBlockMessage', currentSettings.riskControlBlockMessage || '内容审查命中风险规则，请调整输入后重试') || '内容审查命中风险规则，请调整输入后重试',
+    riskControlBlockMessage: pickTextKeepCurrent('riskControlBlockMessage', currentSettings.riskControlBlockMessage || '内容审查命中风险规则，请调整输入后重试') || '内容审查命中风险规则，请调整输入后重试',
     riskControlL1Enabled: pickCheckbox('riskControlL1Enabled', currentBool('riskControlL1Enabled', true)) ? '1' : '0',
-    riskControlL1BaseUrl: pickWhenMissing('riskControlL1BaseUrl', currentSettings.riskControlL1BaseUrl || 'https://api.openai.com') || 'https://api.openai.com',
+    riskControlL1BaseUrl: pickTextKeepCurrent('riskControlL1BaseUrl', currentSettings.riskControlL1BaseUrl || 'https://api.openai.com') || 'https://api.openai.com',
     riskControlL1ApiKey: pickApiKey('riskControlL1ApiKey', currentSettings.riskControlL1ApiKey || ''),
-    riskControlL1Model: pickWhenMissing('riskControlL1Model', currentSettings.riskControlL1Model || 'omni-moderation-latest') || 'omni-moderation-latest',
+    riskControlL1Model: pickTextKeepCurrent('riskControlL1Model', currentSettings.riskControlL1Model || 'omni-moderation-latest') || 'omni-moderation-latest',
     riskControlL1Threshold: String(Math.min(Math.max(pickNumberWhenMissing('riskControlL1Threshold', currentSettings.riskControlL1Threshold ?? 0.7), 0), 1)),
     riskControlL1TimeoutMs: String(Math.max(Math.min(Math.floor(pickNumberWhenMissing('riskControlL1TimeoutMs', currentSettings.riskControlL1TimeoutMs ?? 5000)), 30000), 500)),
     riskControlL2Enabled: pickCheckbox('riskControlL2Enabled', currentBool('riskControlL2Enabled', false)) ? '1' : '0',
-    riskControlL2BaseUrl: pickWhenMissing('riskControlL2BaseUrl', currentSettings.riskControlL2BaseUrl || 'https://api.openai.com') || 'https://api.openai.com',
+    riskControlL2BaseUrl: pickTextKeepCurrent('riskControlL2BaseUrl', currentSettings.riskControlL2BaseUrl || 'https://api.openai.com') || 'https://api.openai.com',
     riskControlL2ApiKey: pickApiKey('riskControlL2ApiKey', currentSettings.riskControlL2ApiKey || ''),
-    riskControlL2Model: pickWhenMissing('riskControlL2Model', currentSettings.riskControlL2Model || 'gpt-4.1-mini') || 'gpt-4.1-mini',
+    riskControlL2Model: pickTextKeepCurrent('riskControlL2Model', currentSettings.riskControlL2Model || 'gpt-4.1-mini') || 'gpt-4.1-mini',
     riskControlL2Prompt: pickWhenMissing(
       'riskControlL2Prompt',
       currentSettings.riskControlL2Prompt || DEFAULT_RISK_CONTROL_L2_PROMPT
