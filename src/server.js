@@ -18,6 +18,12 @@ import {
   sanitizeAccountInput
 } from './core.js';
 import { createStore } from './sqliteStore.js';
+import { createCompatHelpers } from './compatHelpers.js';
+import {
+  createRiskControlModule,
+  normalizeRiskControlMode,
+  normalizeRiskControlScopeMode
+} from './riskControl.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,6 +41,25 @@ const gatewayKeys = (process.env.GATEWAY_KEYS || '')
 
 const store = createStore(dbPath);
 let settings = store.getSettings();
+const compat = createCompatHelpers({
+  buildUpstreamUrl,
+  normalizeBasePath,
+  safeJsonParse,
+  sanitizeLogText,
+  cloneJsonLike,
+  canonicalizeJsonLike: (value) => value,
+  parseResponsesIncludeFields,
+  extractErrorDetail
+});
+const riskControl = createRiskControlModule({
+  store,
+  getSettings: () => settings,
+  buildUpstreamUrl,
+  safeJsonParse,
+  sanitizeLogText,
+  extractErrorDetail,
+  fetchImpl: fetch
+});
 const requestLogBufferLimit = 2000;
 const requestLogPersistLimit = 5000;
 const requestLogs = [];
@@ -92,6 +117,19 @@ function verifyAdminPassword(password) {
 function safeNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function parseCheckboxLike(value) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (parseCheckboxLike(item)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  const text = String(value ?? '').trim().toLowerCase();
+  return ['1', 'true', 'yes', 'on', 'enabled'].includes(text);
 }
 
 function parseOptionalRate(value) {
@@ -491,20 +529,25 @@ function checkGatewayAuth(req, res) {
       if (dbKey.groupId && !dbKey.groupEnabled) {
         const error = 'Bound group is disabled';
         res.status(403).json({ error });
-        return { ok: false, groupKey: '', error };
+        return { ok: false, groupKey: '', groupId: '', error };
       }
       store.touchAccessKey(dbKey.id, new Date().toISOString());
-      return { ok: true, groupKey: dbKey.groupKey || '', accessKeyId: dbKey.id };
+      return {
+        ok: true,
+        groupKey: dbKey.groupKey || '',
+        groupId: dbKey.groupId || '',
+        accessKeyId: dbKey.id
+      };
     }
 
     if (gatewayKeys.length && gatewayKeys.includes(token)) {
-      return { ok: true, groupKey: '', accessKeyId: '' };
+      return { ok: true, groupKey: '', groupId: '', accessKeyId: '' };
     }
   }
 
   const error = 'Unauthorized gateway token';
   res.status(401).json({ error });
-  return { ok: false, groupKey: '', error };
+  return { ok: false, groupKey: '', groupId: '', error };
 }
 
 function maskKey(value = '') {
@@ -654,379 +697,28 @@ function buildUpstreamUrl(baseUrl, requestUrl) {
   return target;
 }
 
-function buildResponsesCompatTargetUrl(baseUrl, requestUrl) {
-  const incoming = new URL(String(requestUrl || '/v1/responses'), 'http://gateway.local');
-  if (incoming.pathname === '/v1/responses' || incoming.pathname === '/v1/responses/compact') {
-    incoming.pathname = '/v1/chat/completions';
-  } else if (incoming.pathname.endsWith('/v1/responses') || incoming.pathname.endsWith('/v1/responses/compact')) {
-    incoming.pathname = incoming.pathname.replace(/\/v1\/responses(?:\/compact)?$/, '/v1/chat/completions');
-  }
-  return buildUpstreamUrl(baseUrl, `${incoming.pathname}${incoming.search}`);
-}
-
-function normalizeServiceBaseUrl(value) {
-  const text = String(value || '').trim();
-  if (!text) {
-    return '';
-  }
-  try {
-    const parsed = new URL(text);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      return '';
-    }
-    return `${parsed.origin}${normalizeBasePath(parsed.pathname)}`;
-  } catch {
-    return '';
-  }
-}
-
-function convertAnthropicToolsToChatTools(tools) {
-  if (!Array.isArray(tools)) {
-    return [];
-  }
-  const converted = [];
-  for (const item of tools) {
-    if (!item || typeof item !== 'object') {
-      continue;
-    }
-    const name = String(item.name || '').trim();
-    if (!name) {
-      continue;
-    }
-    converted.push({
-      type: 'function',
-      function: {
-        name,
-        description: String(item.description || '').trim(),
-        parameters: item.input_schema && typeof item.input_schema === 'object'
-          ? cloneJsonLike(item.input_schema, {})
-          : { type: 'object', properties: {} }
-      }
-    });
-  }
-  return converted;
-}
-
-function convertAnthropicToolChoiceToChatToolChoice(toolChoice) {
-  if (!toolChoice) {
-    return 'auto';
-  }
-  if (typeof toolChoice === 'string') {
-    const normalized = toolChoice.trim().toLowerCase();
-    if (normalized === 'none') {
-      return 'none';
-    }
-    if (normalized === 'auto' || normalized === 'any') {
-      return 'auto';
-    }
-    return 'auto';
-  }
-  if (typeof toolChoice === 'object') {
-    const type = String(toolChoice.type || '').trim().toLowerCase();
-    if (type === 'none') {
-      return 'none';
-    }
-    if (type === 'auto' || type === 'any') {
-      return 'auto';
-    }
-    if (type === 'tool' && toolChoice.name) {
-      return {
-        type: 'function',
-        function: {
-          name: String(toolChoice.name).trim()
-        }
-      };
-    }
-  }
-  return 'auto';
-}
-
-function convertAnthropicMessagesRequestToChatRequest(body) {
-  if (!body || typeof body !== 'object') {
-    return null;
-  }
-  const model = String(body.model || '').trim();
-  if (!model) {
-    return null;
-  }
-  const messages = [];
-  const system = body.system;
-  if (typeof system === 'string' && system.trim()) {
-    messages.push({ role: 'system', content: system.trim() });
-  } else if (Array.isArray(system)) {
-    const parts = system
-      .map((item) => {
-        if (typeof item === 'string') {
-          return item;
-        }
-        if (item && typeof item === 'object' && item.type === 'text') {
-          return String(item.text || '');
-        }
-        return '';
-      })
-      .filter(Boolean);
-    if (parts.length) {
-      messages.push({ role: 'system', content: parts.join('\n') });
-    }
-  }
-
-  const sourceMessages = Array.isArray(body.messages) ? body.messages : [];
-  for (const rawMessage of sourceMessages) {
-    if (!rawMessage || typeof rawMessage !== 'object') {
-      continue;
-    }
-    const role = String(rawMessage.role || '').trim().toLowerCase();
-    if (role !== 'user' && role !== 'assistant') {
-      continue;
-    }
-    const contentBlocks = Array.isArray(rawMessage.content)
-      ? rawMessage.content
-      : [{ type: 'text', text: String(rawMessage.content || '') }];
-    const textParts = [];
-    const assistantToolCalls = [];
-    const toolResultMessages = [];
-
-    for (const block of contentBlocks) {
-      if (!block || typeof block !== 'object') {
-        continue;
-      }
-      const type = String(block.type || '').trim().toLowerCase();
-      if (type === 'text') {
-        const text = String(block.text || '').trim();
-        if (text) {
-          textParts.push(text);
-        }
-        continue;
-      }
-      if (role === 'assistant' && type === 'tool_use') {
-        const name = String(block.name || '').trim();
-        if (!name) {
-          continue;
-        }
-        const callId = String(block.id || `call_${crypto.randomUUID()}`).trim();
-        assistantToolCalls.push({
-          id: callId,
-          type: 'function',
-          function: {
-            name,
-            arguments: normalizeToolCallArguments(block.input)
-          }
-        });
-        continue;
-      }
-      if (role === 'user' && type === 'tool_result') {
-        const toolCallId = String(block.tool_use_id || block.id || '').trim();
-        if (!toolCallId) {
-          continue;
-        }
-        let resultText = '';
-        if (typeof block.content === 'string') {
-          resultText = block.content;
-        } else if (Array.isArray(block.content)) {
-          resultText = block.content
-            .map((item) => (item && typeof item === 'object' ? String(item.text || '') : String(item || '')))
-            .filter(Boolean)
-            .join('\n');
-        } else if (Object.prototype.hasOwnProperty.call(block, 'content')) {
-          resultText = normalizeToolCallArguments(block.content);
-        }
-        toolResultMessages.push({
-          role: 'tool',
-          tool_call_id: toolCallId,
-          content: resultText || ''
-        });
-      }
-    }
-
-    if (role === 'assistant') {
-      const assistantMessage = {
-        role: 'assistant',
-        content: textParts.join('\n')
-      };
-      if (assistantToolCalls.length) {
-        assistantMessage.tool_calls = assistantToolCalls;
-      }
-      messages.push(assistantMessage);
-    } else {
-      messages.push({
-        role: 'user',
-        content: textParts.join('\n')
-      });
-    }
-    for (const toolMessage of toolResultMessages) {
-      messages.push(toolMessage);
-    }
-  }
-
-  if (!messages.length) {
-    messages.push({ role: 'user', content: '' });
-  }
-
-  const chatBody = {
-    model,
-    messages
-  };
-
-  if (Object.prototype.hasOwnProperty.call(body, 'stream')) {
-    chatBody.stream = body.stream === true;
-  }
-  if (chatBody.stream === true) {
-    chatBody.stream_options = { include_usage: true };
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'temperature') && Number.isFinite(Number(body.temperature))) {
-    chatBody.temperature = Number(body.temperature);
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'top_p') && Number.isFinite(Number(body.top_p))) {
-    chatBody.top_p = Number(body.top_p);
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'max_tokens') && Number.isFinite(Number(body.max_tokens))) {
-    const maxTokens = Math.floor(Number(body.max_tokens));
-    if (maxTokens > 0) {
-      chatBody.max_tokens = maxTokens;
-    }
-  }
-  const tools = convertAnthropicToolsToChatTools(body.tools);
-  if (tools.length) {
-    chatBody.tools = tools;
-    chatBody.tool_choice = convertAnthropicToolChoiceToChatToolChoice(body.tool_choice);
-  }
-
-  return chatBody;
-}
-
-function mapFinishReasonToAnthropicStopReason(finishReason) {
-  const normalized = String(finishReason || '').trim().toLowerCase();
-  if (normalized === 'tool_calls' || normalized === 'function_call') {
-    return 'tool_use';
-  }
-  if (normalized === 'length') {
-    return 'max_tokens';
-  }
-  if (normalized === 'content_filter') {
-    return 'content_filter';
-  }
-  return 'end_turn';
-}
-
-function convertChatCompletionToAnthropicResponsePayload(chatPayload, requestModel = '') {
-  const choices = Array.isArray(chatPayload?.choices) ? chatPayload.choices : [];
-  const choice = choices[0] || {};
-  const message = choice.message && typeof choice.message === 'object' ? choice.message : {};
-  const finishReason = mapFinishReasonToAnthropicStopReason(choice.finish_reason);
-  const content = [];
-  const textContent = ensureStringContent(message.content || '');
-  if (textContent) {
-    content.push({
-      type: 'text',
-      text: textContent
-    });
-  }
-  if (Array.isArray(message.tool_calls)) {
-    for (const toolCall of message.tool_calls) {
-      const name = String(toolCall?.function?.name || '').trim();
-      if (!name) {
-        continue;
-      }
-      let input = {};
-      try {
-        const parsed = safeJsonParse(String(toolCall?.function?.arguments || '').trim());
-        input = parsed && typeof parsed === 'object' ? parsed : {};
-      } catch {
-        input = {};
-      }
-      content.push({
-        type: 'tool_use',
-        id: String(toolCall.id || `toolu_${crypto.randomUUID()}`).trim(),
-        name,
-        input
-      });
-    }
-  }
-  const usage = getModelUsage(chatPayload?.usage || {});
-  return {
-    id: String(chatPayload?.id || `msg_${crypto.randomUUID()}`),
-    type: 'message',
-    role: 'assistant',
-    model: String(chatPayload?.model || requestModel || ''),
-    content,
-    stop_reason: finishReason,
-    stop_sequence: null,
-    usage: {
-      input_tokens: usage.input,
-      output_tokens: usage.output
-    }
-  };
-}
-
-function extractSessionRoutingId(req, jsonBody) {
-  const headers = req?.headers || {};
-  const byHeader = [
-    headers['session_id'],
-    headers['x-session-id'],
-    headers['session-id'],
-    headers['x-claude-session-id']
-  ];
-  for (const value of byHeader) {
-    const normalized = normalizeStickyPart(value);
-    if (normalized) {
-      return normalized;
-    }
-  }
-
-  if (!jsonBody || typeof jsonBody !== 'object') {
-    return '';
-  }
-  const byBody = [
-    jsonBody.session_id,
-    jsonBody.sessionId,
-    jsonBody.conversation_id,
-    jsonBody.conversationId,
-    jsonBody.metadata?.session_id,
-    jsonBody.metadata?.sessionId
-  ];
-  for (const value of byBody) {
-    const normalized = normalizeStickyPart(value);
-    if (normalized) {
-      return normalized;
-    }
-  }
-  return '';
-}
-
-function extractPreviousResponseId(jsonBody) {
-  if (!jsonBody || typeof jsonBody !== 'object') {
-    return '';
-  }
-  const candidates = [
-    jsonBody.previous_response_id,
-    jsonBody.previousResponseId,
-    jsonBody.metadata?.previous_response_id,
-    jsonBody.metadata?.previousResponseId
-  ];
-  for (const value of candidates) {
-    const normalized = normalizeStickyPart(value);
-    if (normalized) {
-      return normalized;
-    }
-  }
-  return '';
-}
-
-function extractCodexTurnState(req, jsonBody) {
-  const headers = req?.headers || {};
-  const candidates = [
-    headers['x-codex-turn-state'],
-    jsonBody?.client_metadata?.['x-codex-turn-state'],
-    jsonBody?.client_metadata?.codex_turn_state
-  ];
-  for (const value of candidates) {
-    const text = String(value || '').trim();
-    if (text) {
-      return text;
-    }
-  }
-  return '';
-}
+const {
+  buildResponsesCompatTargetUrl,
+  normalizeServiceBaseUrl,
+  extractSessionRoutingId,
+  extractPreviousResponseId,
+  extractCodexTurnState,
+  extractResponseContinuationIdFromPayload,
+  buildResponseContinuationStickyKey,
+  isLikelyCodexRequest,
+  buildDeterministicRoutingBody,
+  buildCodexTurnStateStickyKey,
+  buildCodexAffinityStickyKey,
+  convertAnthropicMessagesRequestToChatRequest,
+  convertChatCompletionToAnthropicResponsePayload,
+  convertResponsesRequestToChatRequest,
+  convertChatCompletionToResponsesPayload,
+  createChatCompletionsToResponsesSseTransform,
+  createChatCompletionsToAnthropicSseTransform,
+  createStreamUsageObserver,
+  isStreamingRequest,
+  ensureStringContent
+} = compat;
 
 function extractPromptCacheKey(jsonBody) {
   if (!jsonBody || typeof jsonBody !== 'object') {
@@ -1049,125 +741,6 @@ function extractPromptCacheKey(jsonBody) {
   return '';
 }
 
-function extractResponseContinuationIdFromPayload(payload) {
-  if (!payload || typeof payload !== 'object') {
-    return '';
-  }
-  const candidates = [
-    payload.response?.id,
-    payload.response?.response?.id,
-    payload.response_id,
-    payload.responseId,
-    payload.id
-  ];
-  for (const value of candidates) {
-    const normalized = normalizeStickyPart(value);
-    if (normalized) {
-      return normalized;
-    }
-  }
-  return '';
-}
-
-function buildResponseContinuationStickyKey(responseId) {
-  const normalized = normalizeStickyPart(responseId);
-  if (!normalized) {
-    return '';
-  }
-  return `response:${normalized}`;
-}
-
-function bindResponseContinuationSticky(account, responseId, ttlMs = 0) {
-  const stickyKey = buildResponseContinuationStickyKey(responseId);
-  const accountId = String(account?.id || '').trim();
-  if (!stickyKey || !accountId) {
-    return;
-  }
-  const expiresAt = Date.now() + Math.max(Math.floor(Number(ttlMs) || 0), 60 * 1000);
-  store.setStickyBinding(stickyKey, accountId, expiresAt);
-}
-
-function isLikelyCodexRequest(req, jsonBody) {
-  const headers = req?.headers || {};
-  const userAgent = String(headers['user-agent'] || '').toLowerCase();
-  if (userAgent.includes('codex')) {
-    return true;
-  }
-  if (headers['x-codex-installation-id'] || headers['x-codex-turn-state']) {
-    return true;
-  }
-  const promptCacheKey = extractPromptCacheKey(jsonBody);
-  if (promptCacheKey) {
-    return true;
-  }
-  if (jsonBody && typeof jsonBody === 'object') {
-    const clientMetadata = jsonBody.client_metadata;
-    if (clientMetadata && typeof clientMetadata === 'object') {
-      const installationId = clientMetadata['x-codex-installation-id'] || clientMetadata.codex_installation_id;
-      if (String(installationId || '').trim()) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-function buildDeterministicRoutingBody(input, depth = 0) {
-  if (depth > 10) {
-    return null;
-  }
-  if (input === null || input === undefined) {
-    return input;
-  }
-  if (typeof input !== 'object') {
-    return input;
-  }
-  if (Array.isArray(input)) {
-    return input.map((item) => buildDeterministicRoutingBody(item, depth + 1));
-  }
-
-  const skipTopLevelKeys = new Set([
-    'stream',
-    'stream_options',
-    'user',
-    'service_tier',
-    'safety_identifier',
-    'store',
-    'background',
-    'metadata',
-    'client_metadata',
-    'previous_response_id',
-    'previousResponseId',
-    'session_id',
-    'sessionId',
-    'conversation_id',
-    'conversationId',
-    'prompt_cache_key',
-    'promptCacheKey'
-  ]);
-  const skipNestedKeys = new Set([
-    'request_id',
-    'requestId',
-    'trace_id',
-    'traceId',
-    'timestamp',
-    'ts',
-    'nonce'
-  ]);
-
-  const output = {};
-  for (const [key, value] of Object.entries(input)) {
-    if (depth === 0 && skipTopLevelKeys.has(key)) {
-      continue;
-    }
-    if (skipNestedKeys.has(key)) {
-      continue;
-    }
-    output[key] = buildDeterministicRoutingBody(value, depth + 1);
-  }
-  return output;
-}
-
 function buildPromptCacheStickyKey({ provider, model, promptCacheKey }) {
   const key = String(promptCacheKey || '').trim();
   if (!key) {
@@ -1179,2069 +752,15 @@ function buildPromptCacheStickyKey({ provider, model, promptCacheKey }) {
   return `prompt-cache:${providerPart}:${modelPart}:${digest}`;
 }
 
-function buildCodexTurnStateStickyKey({ provider, model, turnState }) {
-  const token = String(turnState || '').trim();
-  if (!token) {
-    return '';
+function bindResponseContinuationSticky(account, responseId, ttlMs = 0) {
+  const stickyKey = buildResponseContinuationStickyKey(responseId);
+  const accountId = String(account?.id || '').trim();
+  if (!stickyKey || !accountId) {
+    return;
   }
-  const providerPart = normalizeStickyPart(provider) || 'openai';
-  const modelPart = normalizeStickyPart(model) || '-';
-  const digest = crypto.createHash('sha256').update(token).digest('hex');
-  return `codex-turn:${providerPart}:${modelPart}:${digest}`;
+  const expiresAt = Date.now() + Math.max(Math.floor(Number(ttlMs) || 0), 60 * 1000);
+  store.setStickyBinding(stickyKey, accountId, expiresAt);
 }
-
-function buildCodexAffinityStickyKey({ provider, model, accessKeyId, req, jsonBody }) {
-  const headers = req?.headers || {};
-  const clientMetadata = (jsonBody && typeof jsonBody === 'object' && jsonBody.client_metadata && typeof jsonBody.client_metadata === 'object')
-    ? jsonBody.client_metadata
-    : null;
-  const installationId = normalizeStickyPart(
-    headers['x-codex-installation-id']
-    || clientMetadata?.['x-codex-installation-id']
-    || clientMetadata?.codex_installation_id
-  );
-  const windowId = normalizeStickyPart(
-    headers['x-codex-window-id']
-    || clientMetadata?.['x-codex-window-id']
-    || clientMetadata?.codex_window_id
-  );
-  const parentThreadId = normalizeStickyPart(
-    headers['x-codex-parent-thread-id']
-    || clientMetadata?.['x-codex-parent-thread-id']
-    || clientMetadata?.codex_parent_thread_id
-  );
-  const subagent = normalizeStickyPart(
-    headers['x-openai-subagent']
-    || clientMetadata?.['x-openai-subagent']
-    || clientMetadata?.openai_subagent
-  );
-  const providerPart = normalizeStickyPart(provider) || 'openai';
-  const modelPart = normalizeStickyPart(model) || '-';
-  const accessPart = normalizeStickyPart(accessKeyId) || 'global';
-  const fingerprintInput = [
-    installationId || '-',
-    windowId || '-',
-    parentThreadId || '-',
-    subagent || '-',
-    String(headers['user-agent'] || '').toLowerCase()
-  ].join('|');
-  const fingerprint = crypto.createHash('sha256').update(fingerprintInput).digest('hex').slice(0, 24);
-  return `codex-affinity:${providerPart}:${modelPart}:${accessPart}:${fingerprint}`;
-}
-
-function ensureStringContent(value) {
-  if (typeof value === 'string') {
-    return value;
-  }
-  if (value === null || value === undefined) {
-    return '';
-  }
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return String(value);
-  }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-function normalizeToolCallArguments(value) {
-  if (typeof value === 'string') {
-    return value;
-  }
-  if (value === null || value === undefined) {
-    return '{}';
-  }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return '{}';
-  }
-}
-
-function extractChatDeltaText(content) {
-  if (typeof content === 'string') {
-    return content;
-  }
-  if (!Array.isArray(content)) {
-    return '';
-  }
-  return content
-    .map((part) => {
-      if (!part || typeof part !== 'object') {
-        return '';
-      }
-      if (typeof part.text === 'string') {
-        return part.text;
-      }
-      if (typeof part.content === 'string') {
-        return part.content;
-      }
-      if (typeof part.delta === 'string') {
-        return part.delta;
-      }
-      return '';
-    })
-    .filter(Boolean)
-    .join('');
-}
-
-function extractToolOutputText(output) {
-  if (typeof output === 'string') {
-    return output;
-  }
-  if (output === null || output === undefined) {
-    return '';
-  }
-  if (Array.isArray(output)) {
-    return output
-      .map((item) => extractToolOutputText(item))
-      .filter(Boolean)
-      .join('\n');
-  }
-  if (typeof output === 'object') {
-    if (typeof output.output_text === 'string') {
-      return output.output_text;
-    }
-    if (typeof output.text === 'string') {
-      return output.text;
-    }
-    if (typeof output.body === 'string') {
-      return output.body;
-    }
-    if (Array.isArray(output.body)) {
-      return output.body
-        .map((item) => ensureStringContent(item?.text || item?.output_text || item?.content || ''))
-        .filter(Boolean)
-        .join('\n');
-    }
-    if (Array.isArray(output.content)) {
-      return output.content
-        .map((item) => ensureStringContent(item?.text || item?.output_text || item?.content || ''))
-        .filter(Boolean)
-        .join('\n');
-    }
-  }
-  return ensureStringContent(output);
-}
-
-function encodeCustomToolInputAsFunctionArguments(input) {
-  if (typeof input === 'string') {
-    const trimmed = input.trim();
-    if (!trimmed) {
-      return '{}';
-    }
-    const parsed = safeJsonParse(trimmed);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return JSON.stringify(parsed);
-    }
-    return JSON.stringify({ input: trimmed });
-  }
-  if (input === null || input === undefined) {
-    return '{}';
-  }
-  if (typeof input === 'object') {
-    try {
-      return JSON.stringify(input);
-    } catch {
-      return JSON.stringify({ input: ensureStringContent(input) });
-    }
-  }
-  return JSON.stringify({ input: ensureStringContent(input) });
-}
-
-function buildNamespacedToolName(namespace, name) {
-  const inner = String(name || '').trim();
-  if (!inner) {
-    return '';
-  }
-  const ns = String(namespace || '').trim();
-  if (!ns) {
-    return inner;
-  }
-  return `${ns}__${inner}`;
-}
-
-function defaultCompatFunctionParameters() {
-  return {
-    type: 'object',
-    properties: {},
-    additionalProperties: true
-  };
-}
-
-function convertResponsesToolToChatFunction(tool, namespaceName = '') {
-  if (!tool || typeof tool !== 'object') {
-    return null;
-  }
-  const source = (tool.function && typeof tool.function === 'object') ? tool.function : tool;
-  const innerName = String(source.name || '').trim();
-  if (!innerName) {
-    return null;
-  }
-  const name = buildNamespacedToolName(namespaceName, innerName);
-  const description = ensureStringContent(source.description || '').trim();
-  const parameters = (source.parameters && typeof source.parameters === 'object' && !Array.isArray(source.parameters))
-    ? source.parameters
-    : defaultCompatFunctionParameters();
-  const strictValue = source.strict ?? tool.strict;
-  const functionSpec = {
-    name,
-    parameters
-  };
-  if (description) {
-    functionSpec.description = description;
-  }
-  if (typeof strictValue === 'boolean') {
-    functionSpec.strict = strictValue;
-  }
-  return {
-    type: 'function',
-    function: functionSpec
-  };
-}
-
-function convertResponsesToolsToChatTools(tools) {
-  if (!Array.isArray(tools) || !tools.length) {
-    return [];
-  }
-  const converted = [];
-  const seenNames = new Set();
-
-  const addFunctionTool = (candidate) => {
-    if (!candidate || typeof candidate !== 'object') {
-      return;
-    }
-    const name = String(candidate?.function?.name || '').trim();
-    if (!name || seenNames.has(name)) {
-      return;
-    }
-    seenNames.add(name);
-    converted.push(candidate);
-  };
-
-  for (const tool of tools) {
-    if (!tool || typeof tool !== 'object') {
-      continue;
-    }
-    const type = String(tool.type || '').trim();
-    if (type === 'function') {
-      addFunctionTool(convertResponsesToolToChatFunction(tool));
-      continue;
-    }
-    if (type === 'namespace') {
-      const namespaceName = String(tool.name || '').trim();
-      const namespaceTools = Array.isArray(tool.tools) ? tool.tools : [];
-      for (const namespaceTool of namespaceTools) {
-        addFunctionTool(convertResponsesToolToChatFunction(namespaceTool, namespaceName));
-      }
-      continue;
-    }
-    if (type === 'custom') {
-      const name = String(tool.name || '').trim();
-      if (!name) {
-        continue;
-      }
-      const description = ensureStringContent(tool.description || '').trim()
-        || `Custom tool "${name}" converted for chat completions compatibility.`;
-      addFunctionTool({
-        type: 'function',
-        function: {
-          name,
-          description,
-          parameters: {
-            type: 'object',
-            properties: {
-              input: {
-                type: 'string',
-                description: 'Raw tool input'
-              }
-            },
-            required: ['input'],
-            additionalProperties: true
-          }
-        }
-      });
-    }
-  }
-
-  return converted;
-}
-
-function convertResponsesToolChoiceToChatToolChoice(toolChoice, chatTools = []) {
-  if (typeof toolChoice === 'string') {
-    return toolChoice;
-  }
-  if (!toolChoice || typeof toolChoice !== 'object') {
-    return 'auto';
-  }
-  const enabledNames = new Set(
-    chatTools
-      .map((item) => String(item?.function?.name || '').trim())
-      .filter(Boolean)
-  );
-  const explicitName = buildNamespacedToolName(
-    toolChoice?.function?.namespace ?? toolChoice?.namespace,
-    toolChoice?.function?.name ?? toolChoice?.name
-  );
-  if (explicitName) {
-    if (!enabledNames.has(explicitName)) {
-      return 'auto';
-    }
-    return {
-      type: 'function',
-      function: { name: explicitName }
-    };
-  }
-  const normalizedType = String(toolChoice.type || '').trim().toLowerCase();
-  if (normalizedType === 'required') {
-    return enabledNames.size > 0 ? 'required' : 'auto';
-  }
-  if (normalizedType === 'none') {
-    return 'none';
-  }
-  return 'auto';
-}
-
-function convertResponsesTextFormatToChatResponseFormat(format) {
-  if (!format || typeof format !== 'object') {
-    return null;
-  }
-  const type = String(format.type || '').trim().toLowerCase();
-  if (!type) {
-    return null;
-  }
-  if (type === 'json_object') {
-    return { type: 'json_object' };
-  }
-  if (type === 'json_schema') {
-    const schemaNode = format.json_schema && typeof format.json_schema === 'object'
-      ? format.json_schema
-      : format;
-    const name = String(schemaNode.name || format.name || 'structured_output').trim() || 'structured_output';
-    const schema = schemaNode.schema && typeof schemaNode.schema === 'object'
-      ? schemaNode.schema
-      : null;
-    if (!schema) {
-      return { type: 'json_object' };
-    }
-    const jsonSchema = {
-      name,
-      schema
-    };
-    if (typeof schemaNode.strict === 'boolean') {
-      jsonSchema.strict = schemaNode.strict;
-    }
-    if (typeof schemaNode.description === 'string' && schemaNode.description.trim()) {
-      jsonSchema.description = schemaNode.description.trim();
-    }
-    return {
-      type: 'json_schema',
-      json_schema: jsonSchema
-    };
-  }
-  return null;
-}
-
-function normalizeChatResponseFormat(format) {
-  if (!format || typeof format !== 'object') {
-    return null;
-  }
-  const type = String(format.type || '').trim().toLowerCase();
-  if (type === 'json_object') {
-    return { type: 'json_object' };
-  }
-  if (type === 'json_schema') {
-    const schemaNode = format.json_schema && typeof format.json_schema === 'object'
-      ? format.json_schema
-      : format;
-    const name = String(schemaNode.name || format.name || 'structured_output').trim() || 'structured_output';
-    const schema = schemaNode.schema && typeof schemaNode.schema === 'object'
-      ? schemaNode.schema
-      : null;
-    if (!schema) {
-      return { type: 'json_object' };
-    }
-    const jsonSchema = {
-      name,
-      schema
-    };
-    if (typeof schemaNode.strict === 'boolean') {
-      jsonSchema.strict = schemaNode.strict;
-    }
-    if (typeof schemaNode.description === 'string' && schemaNode.description.trim()) {
-      jsonSchema.description = schemaNode.description.trim();
-    }
-    return {
-      type: 'json_schema',
-      json_schema: jsonSchema
-    };
-  }
-  return null;
-}
-
-function convertResponsesContentToChatContent(content, role = 'user') {
-  if (typeof content === 'string') {
-    return content;
-  }
-  if (!Array.isArray(content)) {
-    return ensureStringContent(content);
-  }
-
-  const richParts = [];
-  const textParts = [];
-  for (const rawPart of content) {
-    if (!rawPart || typeof rawPart !== 'object') {
-      continue;
-    }
-    const partType = String(rawPart.type || '').trim();
-    if (partType === 'input_text' || partType === 'output_text' || partType === 'text') {
-      const text = ensureStringContent(rawPart.text || '');
-      if (text) {
-        textParts.push(text);
-        richParts.push({ type: 'text', text });
-      }
-      continue;
-    }
-    if (partType === 'input_image') {
-      const imageUrl = typeof rawPart.image_url === 'string'
-        ? rawPart.image_url
-        : ensureStringContent(rawPart.image_url?.url || rawPart.url || '');
-      if (imageUrl) {
-        richParts.push({
-          type: 'image_url',
-          image_url: { url: imageUrl }
-        });
-      }
-      continue;
-    }
-    if (partType === 'input_audio' && rawPart.input_audio) {
-      richParts.push({
-        type: 'input_audio',
-        input_audio: rawPart.input_audio
-      });
-      continue;
-    }
-    if (partType === 'input_file' && rawPart.file) {
-      richParts.push({
-        type: 'file',
-        file: rawPart.file
-      });
-      continue;
-    }
-    if (partType === 'refusal' && typeof rawPart.refusal === 'string') {
-      richParts.push({
-        type: 'text',
-        text: rawPart.refusal
-      });
-      textParts.push(rawPart.refusal);
-      continue;
-    }
-    if (typeof rawPart.text === 'string' && rawPart.text) {
-      textParts.push(rawPart.text);
-      richParts.push({ type: 'text', text: rawPart.text });
-      continue;
-    }
-    const fallbackText = ensureStringContent(rawPart?.text || rawPart?.content || '').trim();
-    if (fallbackText) {
-      textParts.push(fallbackText);
-      richParts.push({ type: 'text', text: fallbackText });
-    }
-  }
-
-  if (!richParts.length) {
-    return '';
-  }
-  const hasNonText = richParts.some((part) => part.type !== 'text');
-  if (!hasNonText) {
-    if (role === 'assistant') {
-      return textParts.join('');
-    }
-    return textParts.join('\n');
-  }
-  return richParts;
-}
-
-function convertResponsesInputToChatMessages(input) {
-  const messages = [];
-  const items = Array.isArray(input) ? input : [input];
-
-  for (const item of items) {
-    if (typeof item === 'string') {
-      if (item.trim()) {
-        messages.push({ role: 'user', content: item });
-      }
-      continue;
-    }
-    if (!item || typeof item !== 'object') {
-      continue;
-    }
-
-    if (item.type === 'function_call_output' || item.type === 'custom_tool_call_output') {
-      const toolCallId = String(item.call_id || item.tool_call_id || '').trim();
-      if (!toolCallId) {
-        continue;
-      }
-      messages.push({
-        role: 'tool',
-        tool_call_id: toolCallId,
-        content: extractToolOutputText(item.output)
-      });
-      continue;
-    }
-
-    if (item.type === 'reasoning') {
-      const summaries = Array.isArray(item.summary) ? item.summary : [];
-      const summaryText = summaries
-        .map((part) => ensureStringContent(part?.text || ''))
-        .join('\n')
-        .trim();
-      if (summaryText) {
-        messages.push({ role: 'assistant', content: summaryText });
-      }
-      continue;
-    }
-
-    if (item.type === 'function_call' || item.type === 'custom_tool_call') {
-      const functionName = buildNamespacedToolName(item.namespace, item.name);
-      const toolCallId = String(item.call_id || item.id || '').trim() || `call_${crypto.randomUUID()}`;
-      if (!functionName) {
-        continue;
-      }
-      const functionArguments = item.type === 'custom_tool_call'
-        ? encodeCustomToolInputAsFunctionArguments(item.input)
-        : normalizeToolCallArguments(item.arguments);
-      messages.push({
-        role: 'assistant',
-        content: '',
-        tool_calls: [{
-          id: toolCallId,
-          type: 'function',
-          function: {
-            name: functionName,
-            arguments: functionArguments
-          }
-        }]
-      });
-      continue;
-    }
-
-    if (item.type === 'input_image') {
-      const imageUrl = typeof item.image_url === 'string'
-        ? item.image_url
-        : ensureStringContent(item.image_url?.url || item.url || '');
-      if (imageUrl) {
-        messages.push({
-          role: 'user',
-          content: [{
-            type: 'image_url',
-            image_url: { url: imageUrl }
-          }]
-        });
-      }
-      continue;
-    }
-    if (item.type === 'input_audio' && item.input_audio) {
-      messages.push({
-        role: 'user',
-        content: [{
-          type: 'input_audio',
-          input_audio: item.input_audio
-        }]
-      });
-      continue;
-    }
-    if (item.type === 'input_file' && item.file) {
-      messages.push({
-        role: 'user',
-        content: [{
-          type: 'file',
-          file: item.file
-        }]
-      });
-      continue;
-    }
-
-    if (item.type === 'message' || item.role) {
-      const roleRaw = String(item.role || 'user').trim().toLowerCase();
-      let role = (
-        roleRaw === 'assistant' ||
-        roleRaw === 'system' ||
-        roleRaw === 'developer' ||
-        roleRaw === 'tool'
-      )
-        ? roleRaw
-        : 'user';
-      // Many OpenAI-compatible upstreams don't understand "developer" yet.
-      if (role === 'developer') {
-        role = 'system';
-      }
-      const content = convertResponsesContentToChatContent(item.content, role);
-      const message = {
-        role,
-        content: content || ''
-      };
-      if (role === 'tool') {
-        const toolCallId = String(item.call_id || item.tool_call_id || '').trim();
-        if (toolCallId) {
-          message.tool_call_id = toolCallId;
-        }
-      }
-      messages.push(message);
-      continue;
-    }
-
-    if (item.type === 'input_text' && item.text) {
-      messages.push({ role: 'user', content: ensureStringContent(item.text) });
-      continue;
-    }
-    if (item.type === 'output_text' && item.text) {
-      messages.push({ role: 'assistant', content: ensureStringContent(item.text) });
-    }
-  }
-
-  return messages;
-}
-
-function convertResponsesRequestToChatRequest(body) {
-  if (!body || typeof body !== 'object') {
-    return null;
-  }
-  const model = String(body.model || '').trim();
-  if (!model) {
-    return null;
-  }
-  const messages = [];
-  const rawInstructions = body.instructions;
-  if (typeof rawInstructions === 'string') {
-    const instructions = rawInstructions.trim();
-    if (instructions) {
-      messages.push({ role: 'system', content: instructions });
-    }
-  } else if (Array.isArray(rawInstructions)) {
-    const instructionsContent = convertResponsesContentToChatContent(rawInstructions, 'system');
-    if (instructionsContent) {
-      messages.push({ role: 'system', content: instructionsContent });
-    }
-  } else if (rawInstructions && typeof rawInstructions === 'object') {
-    const instructionsContent = convertResponsesContentToChatContent(rawInstructions, 'system');
-    if (instructionsContent) {
-      messages.push({ role: 'system', content: instructionsContent });
-    }
-  }
-  const inputMessages = convertResponsesInputToChatMessages(body.input);
-  messages.push(...inputMessages);
-  if (!messages.length) {
-    messages.push({ role: 'user', content: '' });
-  }
-
-  const chatBody = {
-    model,
-    messages
-  };
-
-  if (Object.prototype.hasOwnProperty.call(body, 'stream')) {
-    chatBody.stream = body.stream === true;
-  }
-  if (chatBody.stream === true) {
-    const streamOptions = {};
-    if (body.stream_options && typeof body.stream_options === 'object') {
-      if (Object.prototype.hasOwnProperty.call(body.stream_options, 'include_usage')) {
-        streamOptions.include_usage = body.stream_options.include_usage === true;
-      }
-      if (Object.prototype.hasOwnProperty.call(body.stream_options, 'include_obfuscation')) {
-        streamOptions.include_obfuscation = body.stream_options.include_obfuscation === true;
-      }
-    }
-    if (!Object.prototype.hasOwnProperty.call(streamOptions, 'include_usage')) {
-      streamOptions.include_usage = true;
-    }
-    chatBody.stream_options = streamOptions;
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'temperature') && Number.isFinite(Number(body.temperature))) {
-    chatBody.temperature = Number(body.temperature);
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'top_p') && Number.isFinite(Number(body.top_p))) {
-    chatBody.top_p = Number(body.top_p);
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'presence_penalty') && Number.isFinite(Number(body.presence_penalty))) {
-    chatBody.presence_penalty = Number(body.presence_penalty);
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'frequency_penalty') && Number.isFinite(Number(body.frequency_penalty))) {
-    chatBody.frequency_penalty = Number(body.frequency_penalty);
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'parallel_tool_calls')) {
-    chatBody.parallel_tool_calls = body.parallel_tool_calls === true;
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'stop')) {
-    if (typeof body.stop === 'string' || Array.isArray(body.stop)) {
-      chatBody.stop = body.stop;
-    }
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'user')) {
-    const userValue = String(body.user || '').trim();
-    if (userValue) {
-      chatBody.user = userValue;
-    }
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'metadata') && body.metadata && typeof body.metadata === 'object') {
-    const metadata = cloneJsonLike(body.metadata, null);
-    if (metadata && typeof metadata === 'object') {
-      chatBody.metadata = metadata;
-    }
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'service_tier')) {
-    const tier = String(body.service_tier || '').trim();
-    if (tier) {
-      chatBody.service_tier = tier;
-    }
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'store')) {
-    chatBody.store = body.store === true;
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'prompt_cache_key')) {
-    const cacheKey = String(body.prompt_cache_key || '').trim();
-    if (cacheKey) {
-      chatBody.prompt_cache_key = cacheKey;
-    }
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'prompt_cache_retention')) {
-    const cacheRetention = cloneJsonLike(body.prompt_cache_retention, null);
-    if (cacheRetention && typeof cacheRetention === 'object') {
-      chatBody.prompt_cache_retention = cacheRetention;
-    }
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'safety_identifier')) {
-    const safetyIdentifier = String(body.safety_identifier || '').trim();
-    if (safetyIdentifier) {
-      chatBody.safety_identifier = safetyIdentifier;
-    }
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'reasoning_effort')) {
-    const effort = String(body.reasoning_effort || '').trim();
-    if (effort) {
-      chatBody.reasoning_effort = effort;
-    }
-  }
-  if (
-    !Object.prototype.hasOwnProperty.call(chatBody, 'reasoning_effort') &&
-    body.reasoning &&
-    typeof body.reasoning === 'object' &&
-    body.reasoning.effort
-  ) {
-    const effort = String(body.reasoning.effort || '').trim();
-    if (effort) {
-      chatBody.reasoning_effort = effort;
-    }
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'response_format') && body.response_format && typeof body.response_format === 'object') {
-    const explicitFormat = normalizeChatResponseFormat(body.response_format);
-    if (explicitFormat) {
-      chatBody.response_format = explicitFormat;
-    }
-  }
-  const compatTools = convertResponsesToolsToChatTools(body.tools);
-  if (compatTools.length) {
-    chatBody.tools = compatTools;
-  } else {
-    delete chatBody.tools;
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'tool_choice')) {
-    chatBody.tool_choice = convertResponsesToolChoiceToChatToolChoice(body.tool_choice, compatTools);
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'max_tool_calls') && Number.isFinite(Number(body.max_tool_calls))) {
-    const maxToolCalls = Math.floor(Number(body.max_tool_calls));
-    if (maxToolCalls <= 0) {
-      chatBody.tool_choice = 'none';
-    }
-  }
-
-  if (!Object.prototype.hasOwnProperty.call(chatBody, 'response_format')) {
-    const mappedFormat = convertResponsesTextFormatToChatResponseFormat(body?.text?.format);
-    if (mappedFormat) {
-      chatBody.response_format = mappedFormat;
-    }
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'max_output_tokens') && !Object.prototype.hasOwnProperty.call(chatBody, 'max_tokens')) {
-    const maxTokens = Number(body.max_output_tokens);
-    if (Number.isFinite(maxTokens) && maxTokens > 0) {
-      const normalized = Math.floor(maxTokens);
-      chatBody.max_tokens = normalized;
-      if (!Object.prototype.hasOwnProperty.call(chatBody, 'max_completion_tokens')) {
-        chatBody.max_completion_tokens = normalized;
-      }
-    }
-  }
-  const includeFields = parseResponsesIncludeFields(body.include);
-  const wantsLogprobsFromInclude = includeFields.includes('message.output_text.logprobs');
-  const topLogprobsRaw = Number(body.top_logprobs);
-  const hasTopLogprobs = Number.isFinite(topLogprobsRaw) && topLogprobsRaw > 0;
-  if (Object.prototype.hasOwnProperty.call(body, 'logprobs')) {
-    chatBody.logprobs = body.logprobs === true;
-  }
-  if (wantsLogprobsFromInclude || hasTopLogprobs) {
-    chatBody.logprobs = true;
-  }
-  if (hasTopLogprobs) {
-    chatBody.top_logprobs = Math.floor(topLogprobsRaw);
-  }
-
-  return chatBody;
-}
-
-function buildResponsesUsageFromChatUsage(usage) {
-  if (!usage || typeof usage !== 'object') {
-    return null;
-  }
-  const metrics = getModelUsage(usage);
-  const usagePayload = {
-    input_tokens: metrics.input,
-    output_tokens: metrics.output,
-    total_tokens: metrics.total,
-    // Some OpenAI-compatible dashboards still expect Chat Completions field names.
-    prompt_tokens: metrics.input,
-    completion_tokens: metrics.output,
-    input_tokens_details: {
-      cached_tokens: metrics.cacheRead
-    },
-    output_tokens_details: {
-      reasoning_tokens: metrics.reasoning
-    }
-  };
-  usagePayload.prompt_tokens_details = { ...usagePayload.input_tokens_details };
-  usagePayload.completion_tokens_details = { ...usagePayload.output_tokens_details };
-  if (metrics.cacheRead > 0) {
-    usagePayload.input_tokens_details.cache_read_input_tokens = metrics.cacheRead;
-    usagePayload.cache_read_input_tokens = metrics.cacheRead;
-    usagePayload.prompt_tokens_details.cache_read_input_tokens = metrics.cacheRead;
-  }
-  if (metrics.cacheWrite > 0) {
-    usagePayload.input_tokens_details.cache_creation_input_tokens = metrics.cacheWrite;
-    usagePayload.cache_creation_input_tokens = metrics.cacheWrite;
-    usagePayload.prompt_tokens_details.cache_creation_input_tokens = metrics.cacheWrite;
-  }
-  return usagePayload;
-}
-
-function generateCompatResponseId(chatId = '') {
-  const normalized = String(chatId || '').trim();
-  if (normalized.startsWith('resp_')) {
-    return normalized;
-  }
-  const suffix = normalized || crypto.randomBytes(8).toString('hex');
-  return `resp_${suffix}`;
-}
-
-function extractReasoningDelta(delta = {}) {
-  const chunks = [];
-  let lastChunk = '';
-  const append = (value) => {
-    if (typeof value === 'string' && value) {
-      if (value === lastChunk) {
-        return;
-      }
-      chunks.push(value);
-      lastChunk = value;
-    }
-  };
-  const appendFromCollection = (value) => {
-    if (!value) {
-      return;
-    }
-    if (typeof value === 'string') {
-      append(value);
-      return;
-    }
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        appendFromCollection(item);
-      }
-      return;
-    }
-    if (typeof value === 'object') {
-      const localSeen = new Set();
-      const appendLocal = (text) => {
-        if (typeof text !== 'string' || !text || localSeen.has(text)) {
-          return;
-        }
-        localSeen.add(text);
-        append(text);
-      };
-      appendLocal(value.delta);
-      appendLocal(value.text);
-      appendLocal(value.summary_text);
-      appendLocal(value.content);
-      if (Array.isArray(value.summary)) {
-        appendFromCollection(value.summary);
-      }
-      if (Array.isArray(value.content)) {
-        appendFromCollection(value.content);
-      }
-    }
-  };
-
-  appendFromCollection(delta.reasoning_content);
-  appendFromCollection(delta.reasoning);
-  return chunks.join('');
-}
-
-function convertChatCompletionToResponsesPayload(
-  chatPayload,
-  { includeReasoningSummary = false } = {}
-) {
-  const now = Math.floor(Date.now() / 1000);
-  const choices = Array.isArray(chatPayload?.choices) ? chatPayload.choices : [];
-  const output = [];
-  let incompleteReason = '';
-
-  for (let choiceIndex = 0; choiceIndex < choices.length; choiceIndex += 1) {
-    const choice = choices[choiceIndex] || {};
-    const message = choice?.message || {};
-    let reasoningSummaryText = '';
-    if (includeReasoningSummary) {
-      reasoningSummaryText = extractReasoningDelta(message);
-    }
-    let contentText = '';
-    if (typeof message?.content === 'string') {
-      contentText = message.content;
-    } else if (Array.isArray(message?.content)) {
-      contentText = message.content
-        .map((part) => ensureStringContent(part?.text || part?.content || ''))
-        .filter(Boolean)
-        .join('');
-    } else {
-      contentText = ensureStringContent(message?.content || '');
-    }
-    const finishReason = String(choice?.finish_reason || '').trim();
-    if (!incompleteReason && (finishReason === 'length' || finishReason === 'content_filter')) {
-      incompleteReason = finishReason;
-    }
-
-    if (includeReasoningSummary && reasoningSummaryText) {
-      output.push({
-        type: 'reasoning',
-        id: `rs_${crypto.randomUUID()}`,
-        summary: [{
-          type: 'summary_text',
-          text: reasoningSummaryText
-        }]
-      });
-    }
-
-    if (contentText) {
-      const outputText = {
-        type: 'output_text',
-        text: contentText,
-        annotations: []
-      };
-      if (choice?.logprobs && typeof choice.logprobs === 'object' && Array.isArray(choice.logprobs.content)) {
-        outputText.logprobs = choice.logprobs.content;
-      }
-      output.push({
-        type: 'message',
-        id: `msg_${choiceIndex}_${crypto.randomUUID()}`,
-        role: 'assistant',
-        status: 'completed',
-        content: [outputText]
-      });
-    }
-
-    if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
-      for (const toolCall of message.tool_calls) {
-        const callName = String(toolCall?.function?.name || '').trim();
-        if (!callName) {
-          continue;
-        }
-        output.push({
-          type: 'function_call',
-          id: String(toolCall.id || '').trim() || `fc_${choiceIndex}_${crypto.randomUUID()}`,
-          call_id: String(toolCall.id || '').trim() || `call_${choiceIndex}_${crypto.randomUUID()}`,
-          name: callName,
-          arguments: normalizeToolCallArguments(toolCall?.function?.arguments),
-          status: 'completed'
-        });
-      }
-    }
-  }
-
-  if (!output.length) {
-    output.push({
-      type: 'message',
-      id: `msg_${crypto.randomUUID()}`,
-      role: 'assistant',
-      status: 'completed',
-      content: [{
-        type: 'output_text',
-        text: '',
-        annotations: []
-      }]
-    });
-  }
-
-  const responsePayload = {
-    id: generateCompatResponseId(chatPayload?.id),
-    object: 'response',
-    created_at: safeNumber(chatPayload?.created, now),
-    status: 'completed',
-    model: chatPayload?.model || '',
-    output,
-    usage: buildResponsesUsageFromChatUsage(chatPayload?.usage)
-  };
-  if (incompleteReason) {
-    responsePayload.status = 'incomplete';
-    responsePayload.incomplete_details = { reason: incompleteReason };
-  }
-  return responsePayload;
-}
-
-function createResponsesCompatStreamParser(
-  { responseId, model, includeReasoningSummary = false } = {}
-) {
-  const rid = generateCompatResponseId(responseId);
-  const createdAt = Math.floor(Date.now() / 1000);
-  let started = false;
-  let finished = false;
-  let usage = null;
-  let completedResponse = null;
-  let nextOutputIndex = 0;
-  let finalFinishReason = '';
-  let sequenceNumber = 0;
-  const choiceStates = new Map();
-  const choiceOrder = [];
-
-  const allocateOutputIndex = () => {
-    const current = nextOutputIndex;
-    nextOutputIndex += 1;
-    return current;
-  };
-  const emit = (payload) => {
-    // OpenAI Responses streaming uses a monotonically increasing sequence number starting at 0.
-    const seq = sequenceNumber;
-    sequenceNumber += 1;
-    return `data: ${JSON.stringify({ ...payload, sequence_number: seq })}\n\n`;
-  };
-
-	  const maybeStart = () => {
-	    if (started) {
-	      return '';
-	    }
-	    started = true;
-    return emit({
-      type: 'response.created',
-      response: {
-        id: rid,
-        object: 'response',
-        created_at: createdAt,
-        status: 'in_progress',
-        model: model || ''
-      }
-    });
-  };
-
-  const getChoiceState = (choiceIndex) => {
-    const normalizedIndex = Number.isFinite(choiceIndex) ? Math.max(0, Math.floor(choiceIndex)) : 0;
-    if (choiceStates.has(normalizedIndex)) {
-      return choiceStates.get(normalizedIndex);
-    }
-    const state = {
-      index: normalizedIndex,
-      reasoningBuffer: '',
-      textBuffer: '',
-      toolCalls: [],
-      emittedReasoningItemAdded: false,
-      emittedReasoningSummaryPartAdded: false,
-      emittedTextItemAdded: false,
-      emittedContentPartAdded: false,
-      finished: false,
-      reasoningItemId: `rs_${crypto.randomUUID()}`,
-      reasoningOutputIndex: null,
-      messageItemId: `msg_${crypto.randomUUID()}`,
-      messageOutputIndex: null
-    };
-    choiceStates.set(normalizedIndex, state);
-    choiceOrder.push(normalizedIndex);
-    return state;
-  };
-
-  const ensureReasoningOutputIndex = (state) => {
-    if (state.reasoningOutputIndex === null) {
-      state.reasoningOutputIndex = allocateOutputIndex();
-    }
-    return state.reasoningOutputIndex;
-  };
-  const ensureMessageOutputIndex = (state) => {
-    if (state.messageOutputIndex === null) {
-      state.messageOutputIndex = allocateOutputIndex();
-    }
-    return state.messageOutputIndex;
-  };
-  const ensureToolOutputIndex = (tool) => {
-    if (!Number.isFinite(tool.outputIndex)) {
-      tool.outputIndex = allocateOutputIndex();
-    }
-    return tool.outputIndex;
-  };
-  const ensureToolIdentifiers = (tool) => {
-    if (!tool.id) {
-      tool.id = `fc_${crypto.randomUUID()}`;
-    }
-    if (!tool.call_id) {
-      tool.call_id = `call_${crypto.randomUUID()}`;
-    }
-  };
-
-  const pushChoiceOutput = (state, indexedOutput) => {
-    if (includeReasoningSummary && state.reasoningBuffer) {
-      indexedOutput.push({
-        index: ensureReasoningOutputIndex(state),
-        item: {
-          type: 'reasoning',
-          id: state.reasoningItemId,
-          status: 'completed',
-          summary: [{
-            type: 'summary_text',
-            text: state.reasoningBuffer
-          }]
-        }
-      });
-    }
-    if (state.textBuffer) {
-      indexedOutput.push({
-        index: ensureMessageOutputIndex(state),
-        item: {
-          type: 'message',
-          id: state.messageItemId,
-          role: 'assistant',
-          status: 'completed',
-          content: [{
-            type: 'output_text',
-            text: state.textBuffer,
-            annotations: []
-          }]
-        }
-      });
-    }
-    for (const tool of state.toolCalls) {
-      ensureToolIdentifiers(tool);
-      indexedOutput.push({
-        index: ensureToolOutputIndex(tool),
-        item: {
-          type: 'function_call',
-          id: tool.id,
-          call_id: tool.call_id,
-          name: tool.name,
-          arguments: tool.arguments,
-          status: 'completed'
-        }
-      });
-    }
-  }
-
-  const toResponsesOutput = () => {
-    const indexedOutput = [];
-    for (const choiceIndex of choiceOrder) {
-      const state = choiceStates.get(choiceIndex);
-      if (!state) {
-        continue;
-      }
-      pushChoiceOutput(state, indexedOutput);
-    }
-    if (!indexedOutput.length) {
-      const fallbackChoice = getChoiceState(0);
-      indexedOutput.push({
-        index: ensureMessageOutputIndex(fallbackChoice),
-        item: {
-          type: 'message',
-          id: fallbackChoice.messageItemId,
-          role: 'assistant',
-          status: 'completed',
-          content: [{
-            type: 'output_text',
-            text: '',
-            annotations: []
-          }]
-        }
-      });
-    }
-    indexedOutput.sort((left, right) => left.index - right.index);
-    return indexedOutput.map((entry) => entry.item);
-  };
-
-  const finish = () => {
-    if (finished) {
-      return '';
-    }
-    finished = true;
-    const parts = [];
-    for (const choiceIndex of choiceOrder) {
-      const state = choiceStates.get(choiceIndex);
-      if (!state) {
-        continue;
-      }
-      if (includeReasoningSummary && state.reasoningBuffer) {
-        const outputIndex = ensureReasoningOutputIndex(state);
-        if (!state.emittedReasoningItemAdded) {
-          state.emittedReasoningItemAdded = true;
-          parts.push(emit({
-            type: 'response.output_item.added',
-            output_index: outputIndex,
-            item: {
-              type: 'reasoning',
-              id: state.reasoningItemId,
-              status: 'in_progress',
-              summary: []
-            }
-          }));
-        }
-        if (!state.emittedReasoningSummaryPartAdded) {
-          state.emittedReasoningSummaryPartAdded = true;
-          parts.push(emit({
-            type: 'response.reasoning_summary_part.added',
-            item_id: state.reasoningItemId,
-            output_index: outputIndex,
-            summary_index: 0,
-            part: {
-              type: 'summary_text',
-              text: ''
-            }
-          }));
-        }
-        parts.push(emit({
-          type: 'response.reasoning_summary_text.done',
-          item_id: state.reasoningItemId,
-          output_index: outputIndex,
-          summary_index: 0,
-          text: state.reasoningBuffer
-        }));
-        parts.push(emit({
-          type: 'response.reasoning_summary_part.done',
-          item_id: state.reasoningItemId,
-          output_index: outputIndex,
-          summary_index: 0,
-          part: {
-            type: 'summary_text',
-            text: state.reasoningBuffer
-          }
-        }));
-        parts.push(emit({
-          type: 'response.output_item.done',
-          output_index: outputIndex,
-          item: {
-            type: 'reasoning',
-            id: state.reasoningItemId,
-            status: 'completed',
-            summary: [{
-              type: 'summary_text',
-              text: state.reasoningBuffer
-            }]
-          }
-        }));
-      }
-      if (state.textBuffer && !state.emittedTextItemAdded) {
-        state.emittedTextItemAdded = true;
-        const outputIndex = ensureMessageOutputIndex(state);
-        parts.push(emit({
-          type: 'response.output_item.added',
-          output_index: outputIndex,
-          item: {
-            type: 'message',
-            id: state.messageItemId,
-            role: 'assistant',
-            status: 'in_progress',
-            content: []
-          }
-        }));
-      }
-      if (state.textBuffer && !state.emittedContentPartAdded) {
-        state.emittedContentPartAdded = true;
-        const outputIndex = ensureMessageOutputIndex(state);
-        parts.push(emit({
-          type: 'response.content_part.added',
-          item_id: state.messageItemId,
-          output_index: outputIndex,
-          content_index: 0,
-          part: {
-            type: 'output_text',
-            text: '',
-            annotations: []
-          }
-        }));
-      }
-      if (state.textBuffer) {
-        const outputIndex = ensureMessageOutputIndex(state);
-        parts.push(emit({
-          type: 'response.output_text.done',
-          item_id: state.messageItemId,
-          output_index: outputIndex,
-          content_index: 0,
-          text: state.textBuffer
-        }));
-        parts.push(emit({
-          type: 'response.content_part.done',
-          item_id: state.messageItemId,
-          output_index: outputIndex,
-          content_index: 0,
-          part: {
-            type: 'output_text',
-            text: state.textBuffer,
-            annotations: []
-          }
-        }));
-        parts.push(emit({
-          type: 'response.output_item.done',
-          output_index: outputIndex,
-          item: {
-            type: 'message',
-            id: state.messageItemId,
-            role: 'assistant',
-            status: 'completed',
-            content: [{
-              type: 'output_text',
-              text: state.textBuffer,
-              annotations: []
-            }]
-          }
-        }));
-      }
-      if (state.toolCalls.length) {
-        for (const tool of state.toolCalls) {
-          ensureToolIdentifiers(tool);
-          const outputIndex = ensureToolOutputIndex(tool);
-          parts.push(emit({
-            type: 'response.function_call_arguments.done',
-            item_id: tool.id,
-            output_index: outputIndex,
-            arguments: tool.arguments
-          }));
-          parts.push(emit({
-            type: 'response.output_item.done',
-            output_index: outputIndex,
-            item: {
-              type: 'function_call',
-              id: tool.id,
-              call_id: tool.call_id,
-              name: tool.name,
-              arguments: tool.arguments,
-              status: 'completed'
-            }
-          }));
-        }
-      }
-    }
-    const responsePayload = {
-      id: rid,
-      object: 'response',
-      created_at: createdAt,
-      status: 'completed',
-      model: model || '',
-      output: toResponsesOutput(),
-      usage: buildResponsesUsageFromChatUsage(usage)
-    };
-    if (finalFinishReason === 'length' || finalFinishReason === 'content_filter') {
-      responsePayload.status = 'incomplete';
-      responsePayload.incomplete_details = { reason: finalFinishReason };
-    }
-    completedResponse = responsePayload;
-    parts.push(emit({
-      type: 'response.completed',
-      response: responsePayload
-    }));
-    parts.push('data: [DONE]\n\n');
-    return parts.join('');
-  };
-
-  const consumeChunk = (chunk) => {
-    if (!chunk || typeof chunk !== 'object') {
-      return '';
-    }
-    const parts = [];
-    parts.push(maybeStart());
-    if (chunk.model && !model) {
-      model = String(chunk.model || '');
-    }
-    if (chunk.usage && typeof chunk.usage === 'object') {
-      usage = chunk.usage;
-    }
-
-    const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
-    for (const choice of choices) {
-      const choiceIndex = Number.isFinite(choice?.index) ? choice.index : 0;
-      const state = getChoiceState(choiceIndex);
-      const delta = choice?.delta || {};
-      if (includeReasoningSummary) {
-        const reasoningDelta = extractReasoningDelta(delta);
-        if (reasoningDelta) {
-          const outputIndex = ensureReasoningOutputIndex(state);
-          if (!state.emittedReasoningItemAdded) {
-            state.emittedReasoningItemAdded = true;
-            parts.push(emit({
-              type: 'response.output_item.added',
-              output_index: outputIndex,
-              item: {
-                type: 'reasoning',
-                id: state.reasoningItemId,
-                status: 'in_progress',
-                summary: []
-              }
-            }));
-          }
-          if (!state.emittedReasoningSummaryPartAdded) {
-            state.emittedReasoningSummaryPartAdded = true;
-            parts.push(emit({
-              type: 'response.reasoning_summary_part.added',
-              item_id: state.reasoningItemId,
-              output_index: outputIndex,
-              summary_index: 0,
-              part: {
-                type: 'summary_text',
-                text: ''
-              }
-            }));
-          }
-          state.reasoningBuffer += reasoningDelta;
-          parts.push(emit({
-            type: 'response.reasoning_summary_text.delta',
-            item_id: state.reasoningItemId,
-            output_index: outputIndex,
-            summary_index: 0,
-            delta: reasoningDelta
-          }));
-        }
-      }
-
-      const deltaText = extractChatDeltaText(delta.content) || ensureStringContent(delta.content || '');
-      if (deltaText) {
-        const outputIndex = ensureMessageOutputIndex(state);
-        if (!state.emittedTextItemAdded) {
-          state.emittedTextItemAdded = true;
-          parts.push(emit({
-            type: 'response.output_item.added',
-            output_index: outputIndex,
-            item: {
-              type: 'message',
-              id: state.messageItemId,
-              role: 'assistant',
-              status: 'in_progress',
-              content: []
-            }
-          }));
-        }
-        if (!state.emittedContentPartAdded) {
-          state.emittedContentPartAdded = true;
-          parts.push(emit({
-            type: 'response.content_part.added',
-            item_id: state.messageItemId,
-            output_index: outputIndex,
-            content_index: 0,
-            part: {
-              type: 'output_text',
-              text: '',
-              annotations: []
-            }
-          }));
-        }
-        state.textBuffer += deltaText;
-        parts.push(emit({
-          type: 'response.output_text.delta',
-          item_id: state.messageItemId,
-          output_index: outputIndex,
-          content_index: 0,
-          delta: deltaText
-        }));
-      }
-
-      if (Array.isArray(delta.tool_calls)) {
-        for (const toolCallDelta of delta.tool_calls) {
-          const index = Number.isFinite(toolCallDelta?.index) ? toolCallDelta.index : state.toolCalls.length;
-          while (state.toolCalls.length <= index) {
-            state.toolCalls.push({
-              id: '',
-              call_id: '',
-              name: '',
-              arguments: '',
-              outputIndex: null,
-              emittedAdded: false
-            });
-          }
-          const target = state.toolCalls[index];
-          if (toolCallDelta?.id && !target.emittedAdded) {
-            target.id = String(toolCallDelta.id);
-            target.call_id = String(toolCallDelta.id);
-          }
-          if (toolCallDelta?.function?.name) {
-            target.name = String(toolCallDelta.function.name);
-          }
-          ensureToolIdentifiers(target);
-          const outputIndex = ensureToolOutputIndex(target);
-          if (!target.emittedAdded) {
-            target.emittedAdded = true;
-            parts.push(emit({
-              type: 'response.output_item.added',
-              output_index: outputIndex,
-              item: {
-                type: 'function_call',
-                id: target.id,
-                call_id: target.call_id,
-                name: target.name,
-                arguments: '',
-                status: 'in_progress'
-              }
-            }));
-          }
-          if (typeof toolCallDelta?.function?.arguments === 'string') {
-            target.arguments += toolCallDelta.function.arguments;
-            parts.push(emit({
-              type: 'response.function_call_arguments.delta',
-              item_id: target.id,
-              output_index: outputIndex,
-              delta: toolCallDelta.function.arguments
-            }));
-          }
-        }
-      }
-
-      const finishReason = String(choice?.finish_reason || '').trim();
-      if (finishReason) {
-        if (finishReason === 'length' || finishReason === 'content_filter') {
-          finalFinishReason = finishReason;
-        } else if (!finalFinishReason) {
-          finalFinishReason = finishReason;
-        }
-        state.finished = true;
-      }
-    }
-
-    return parts.join('');
-  };
-
-  return {
-    consumeChunk,
-    finish,
-    getUsage: () => buildResponsesUsageFromChatUsage(usage),
-    getCompletedResponse: () => completedResponse
-  };
-}
-
-function createChatCompletionsToResponsesSseTransform(
-  { responseId, model, includeReasoningSummary = false } = {}
-) {
-  const parser = createResponsesCompatStreamParser({
-    responseId,
-    model,
-    includeReasoningSummary
-  });
-  let buffer = '';
-  let currentDataLines = [];
-
-  const flushData = (push) => {
-    if (!currentDataLines.length) {
-      return;
-    }
-    const payloadText = currentDataLines.join('\n').trim();
-    currentDataLines = [];
-    if (!payloadText) {
-      return;
-    }
-    if (payloadText === '[DONE]') {
-      push(parser.finish());
-      return;
-    }
-    const payload = safeJsonParse(payloadText);
-    if (!payload) {
-      return;
-    }
-    push(parser.consumeChunk(payload));
-  };
-
-  const transformer = new Transform({
-    transform(chunk, _encoding, callback) {
-      buffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk || '');
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() ?? '';
-      for (const line of lines) {
-        if (line === '') {
-          flushData((eventPayload) => {
-            if (eventPayload) {
-              this.push(eventPayload);
-            }
-          });
-          continue;
-        }
-        if (line.startsWith('data:')) {
-          currentDataLines.push(line.slice(5).trimStart());
-        }
-      }
-      callback();
-    },
-    flush(callback) {
-      if (buffer) {
-        if (buffer.startsWith('data:')) {
-          currentDataLines.push(buffer.slice(5).trimStart());
-        }
-        buffer = '';
-      }
-      flushData((eventPayload) => {
-        if (eventPayload) {
-          this.push(eventPayload);
-        }
-      });
-      const tail = parser.finish();
-      if (tail) {
-        this.push(tail);
-      }
-      callback();
-    }
-  });
-
-  return {
-    transformer,
-    getUsage: () => parser.getUsage(),
-    getCompletedResponse: () => parser.getCompletedResponse()
-  };
-}
-
-function createAnthropicCompatStreamParser(
-  { messageId, model } = {}
-) {
-  const mid = String(messageId || `msg_${crypto.randomUUID()}`).trim();
-  let currentModel = String(model || '').trim();
-  let currentUsageRaw = {};
-  let finalized = false;
-  let messageStarted = false;
-  let textBlockStarted = false;
-  let textBlockClosed = false;
-  let textBlockIndex = null;
-  let nextContentIndex = 0;
-  let finalFinishReason = '';
-  const toolStates = new Map();
-
-  const emitEvent = (event, payload) => (
-    `event: ${event}\n` +
-    `data: ${JSON.stringify(payload)}\n\n`
-  );
-
-  const buildAnthropicUsage = () => {
-    const metrics = getModelUsage(currentUsageRaw || {});
-    const payload = {
-      input_tokens: metrics.input,
-      output_tokens: metrics.output
-    };
-    if (metrics.cacheRead > 0) {
-      payload.cache_read_input_tokens = metrics.cacheRead;
-    }
-    if (metrics.cacheWrite > 0) {
-      payload.cache_creation_input_tokens = metrics.cacheWrite;
-    }
-    return payload;
-  };
-
-  const ensureMessageStart = () => {
-    if (messageStarted) {
-      return '';
-    }
-    messageStarted = true;
-    return emitEvent('message_start', {
-      type: 'message_start',
-      message: {
-        id: mid,
-        type: 'message',
-        role: 'assistant',
-        content: [],
-        model: currentModel || '',
-        stop_reason: null,
-        stop_sequence: null,
-        usage: buildAnthropicUsage()
-      }
-    });
-  };
-
-  const ensureTextBlockStart = () => {
-    if (textBlockStarted && !textBlockClosed) {
-      return '';
-    }
-    textBlockStarted = true;
-    textBlockClosed = false;
-    textBlockIndex = nextContentIndex;
-    nextContentIndex += 1;
-    return emitEvent('content_block_start', {
-      type: 'content_block_start',
-      index: textBlockIndex,
-      content_block: {
-        type: 'text',
-        text: ''
-      }
-    });
-  };
-
-  const closeTextBlockIfNeeded = () => {
-    if (!textBlockStarted || textBlockClosed || !Number.isFinite(textBlockIndex)) {
-      return '';
-    }
-    textBlockClosed = true;
-    return emitEvent('content_block_stop', {
-      type: 'content_block_stop',
-      index: textBlockIndex
-    });
-  };
-
-  const ensureToolState = (toolIndex) => {
-    const normalizedIndex = Number.isFinite(toolIndex) ? Math.max(0, Math.floor(toolIndex)) : toolStates.size;
-    if (toolStates.has(normalizedIndex)) {
-      return toolStates.get(normalizedIndex);
-    }
-    const state = {
-      toolIndex: normalizedIndex,
-      contentIndex: nextContentIndex,
-      id: '',
-      name: '',
-      pendingArguments: '',
-      started: false,
-      stopped: false
-    };
-    nextContentIndex += 1;
-    toolStates.set(normalizedIndex, state);
-    return state;
-  };
-
-  const ensureToolStart = (state) => {
-    if (!state || state.started) {
-      return '';
-    }
-    if (!state.name) {
-      return '';
-    }
-    state.started = true;
-    state.stopped = false;
-    if (!state.id) {
-      state.id = `toolu_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;
-    }
-    return emitEvent('content_block_start', {
-      type: 'content_block_start',
-      index: state.contentIndex,
-      content_block: {
-        type: 'tool_use',
-        id: state.id,
-        name: state.name,
-        input: {}
-      }
-    });
-  };
-
-  const closeToolIfNeeded = (state) => {
-    if (!state || !state.started || state.stopped) {
-      return '';
-    }
-    state.stopped = true;
-    return emitEvent('content_block_stop', {
-      type: 'content_block_stop',
-      index: state.contentIndex
-    });
-  };
-
-  const closeAllToolBlocks = () => {
-    const parts = [];
-    const ordered = Array.from(toolStates.values())
-      .sort((left, right) => left.contentIndex - right.contentIndex);
-    for (const state of ordered) {
-      const maybeStart = ensureToolStart(state);
-      if (maybeStart) {
-        parts.push(maybeStart);
-      }
-      const maybeClose = closeToolIfNeeded(state);
-      if (maybeClose) {
-        parts.push(maybeClose);
-      }
-    }
-    return parts.join('');
-  };
-
-  const finish = () => {
-    if (finalized) {
-      return '';
-    }
-    finalized = true;
-    const parts = [];
-    parts.push(ensureMessageStart());
-    parts.push(closeTextBlockIfNeeded());
-    parts.push(closeAllToolBlocks());
-    parts.push(emitEvent('message_delta', {
-      type: 'message_delta',
-      delta: {
-        stop_reason: mapFinishReasonToAnthropicStopReason(finalFinishReason),
-        stop_sequence: null
-      },
-      usage: buildAnthropicUsage()
-    }));
-    parts.push(emitEvent('message_stop', {
-      type: 'message_stop'
-    }));
-    parts.push('data: [DONE]\n\n');
-    return parts.join('');
-  };
-
-  const consumeChunk = (chunk) => {
-    if (!chunk || typeof chunk !== 'object') {
-      return '';
-    }
-    const parts = [];
-    if ((chunk.error && typeof chunk.error === 'object') || String(chunk.type || '').toLowerCase() === 'error') {
-      const message = extractErrorDetail(chunk, 'Upstream stream error');
-      parts.push(emitEvent('error', {
-        type: 'error',
-        error: {
-          type: String(chunk.error?.type || chunk.type || 'api_error'),
-          message
-        }
-      }));
-      return parts.join('');
-    }
-    if (chunk.model && !currentModel) {
-      currentModel = String(chunk.model || '');
-    }
-    if (chunk.usage && typeof chunk.usage === 'object') {
-      currentUsageRaw = chunk.usage;
-    }
-    parts.push(ensureMessageStart());
-    const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
-    for (const choice of choices) {
-      const delta = choice?.delta || {};
-      const finishReason = String(choice?.finish_reason || '').trim();
-      if (finishReason) {
-        finalFinishReason = finishReason;
-      }
-
-      let textDelta = extractChatDeltaText(delta.content);
-      if (!textDelta && typeof delta.content === 'string') {
-        textDelta = delta.content;
-      }
-      if (textDelta) {
-        parts.push(ensureTextBlockStart());
-        parts.push(emitEvent('content_block_delta', {
-          type: 'content_block_delta',
-          index: textBlockIndex,
-          delta: {
-            type: 'text_delta',
-            text: textDelta
-          }
-        }));
-      }
-
-      if (Array.isArray(delta.tool_calls)) {
-        const maybeCloseText = closeTextBlockIfNeeded();
-        if (maybeCloseText) {
-          parts.push(maybeCloseText);
-        }
-        for (const toolCallDelta of delta.tool_calls) {
-          const state = ensureToolState(toolCallDelta?.index);
-          if (toolCallDelta?.id) {
-            state.id = String(toolCallDelta.id || '').trim() || state.id;
-          }
-          if (toolCallDelta?.function?.name) {
-            state.name = String(toolCallDelta.function.name || '').trim();
-          }
-          const startEvent = ensureToolStart(state);
-          if (startEvent) {
-            parts.push(startEvent);
-            if (state.pendingArguments) {
-              parts.push(emitEvent('content_block_delta', {
-                type: 'content_block_delta',
-                index: state.contentIndex,
-                delta: {
-                  type: 'input_json_delta',
-                  partial_json: state.pendingArguments
-                }
-              }));
-              state.pendingArguments = '';
-            }
-          }
-          if (typeof toolCallDelta?.function?.arguments === 'string' && toolCallDelta.function.arguments) {
-            if (!state.started) {
-              state.pendingArguments += toolCallDelta.function.arguments;
-            } else {
-              parts.push(emitEvent('content_block_delta', {
-                type: 'content_block_delta',
-                index: state.contentIndex,
-                delta: {
-                  type: 'input_json_delta',
-                  partial_json: toolCallDelta.function.arguments
-                }
-              }));
-            }
-          }
-        }
-      }
-    }
-    return parts.join('');
-  };
-
-  return {
-    consumeChunk,
-    finish,
-    getUsage: () => getModelUsage(currentUsageRaw || {})
-  };
-}
-
-function createChatCompletionsToAnthropicSseTransform(
-  { messageId, model } = {}
-) {
-  const parser = createAnthropicCompatStreamParser({ messageId, model });
-  let buffer = '';
-  let currentDataLines = [];
-
-  const flushData = (push) => {
-    if (!currentDataLines.length) {
-      return;
-    }
-    const payloadText = currentDataLines.join('\n').trim();
-    currentDataLines = [];
-    if (!payloadText) {
-      return;
-    }
-    if (payloadText === '[DONE]') {
-      push(parser.finish());
-      return;
-    }
-    const payload = safeJsonParse(payloadText);
-    if (!payload) {
-      return;
-    }
-    push(parser.consumeChunk(payload));
-  };
-
-  const transformer = new Transform({
-    transform(chunk, _encoding, callback) {
-      buffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk || '');
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() ?? '';
-      for (const line of lines) {
-        if (line === '') {
-          flushData((eventPayload) => {
-            if (eventPayload) {
-              this.push(eventPayload);
-            }
-          });
-          continue;
-        }
-        if (line.startsWith('data:')) {
-          currentDataLines.push(line.slice(5).trimStart());
-        }
-      }
-      callback();
-    },
-    flush(callback) {
-      if (buffer) {
-        if (buffer.startsWith('data:')) {
-          currentDataLines.push(buffer.slice(5).trimStart());
-        }
-        buffer = '';
-      }
-      flushData((eventPayload) => {
-        if (eventPayload) {
-          this.push(eventPayload);
-        }
-      });
-      const tail = parser.finish();
-      if (tail) {
-        this.push(tail);
-      }
-      callback();
-    }
-  });
-
-  return {
-    transformer,
-    getUsage: () => parser.getUsage()
-  };
-}
-
-function createStreamUsageObserver(contentType, { onUsage, onPayload, onResponseId } = {}) {
-  const lower = String(contentType || '').toLowerCase();
-  const isSse = lower.includes('text/event-stream');
-  let buffer = '';
-  let eventDataLines = [];
-
-  const maybeCaptureUsage = (text) => {
-    const trimmed = String(text || '').trim();
-    if (!trimmed || trimmed === '[DONE]') {
-      return;
-    }
-    const payload = safeJsonParse(trimmed);
-    if (!payload) {
-      return;
-    }
-    if (typeof onPayload === 'function') {
-      onPayload(payload);
-    }
-    const responseId = extractResponseContinuationIdFromPayload(payload);
-    if (responseId && typeof onResponseId === 'function') {
-      onResponseId(responseId);
-    }
-    const usage = extractUsageFromPayload(payload);
-    if (usage && typeof onUsage === 'function') {
-      onUsage(usage);
-    }
-  };
-
-  const consumeSseLine = (line) => {
-    if (line === '') {
-      if (eventDataLines.length) {
-        maybeCaptureUsage(eventDataLines.join('\n'));
-      }
-      eventDataLines = [];
-      return;
-    }
-    if (line.startsWith('data:')) {
-      eventDataLines.push(line.slice(5).trimStart());
-    }
-  };
-
-  return new Transform({
-    transform(chunk, _encoding, callback) {
-      const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk || '');
-      buffer += text;
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() ?? '';
-
-      if (isSse) {
-        for (const line of lines) {
-          consumeSseLine(line);
-        }
-      } else {
-        for (const line of lines) {
-          maybeCaptureUsage(line);
-        }
-      }
-
-      callback(null, chunk);
-    },
-    flush(callback) {
-      if (isSse) {
-        if (buffer) {
-          consumeSseLine(buffer);
-        }
-        if (eventDataLines.length) {
-          maybeCaptureUsage(eventDataLines.join('\n'));
-        }
-      } else if (buffer) {
-        maybeCaptureUsage(buffer);
-      }
-      callback();
-    }
-  });
-}
-
-function isStreamingRequest({ supportsStreamField, jsonBody, req }) {
-  if (!supportsStreamField) {
-    return false;
-  }
-  if (jsonBody && typeof jsonBody === 'object' && jsonBody.stream === true) {
-    return true;
-  }
-  const accept = String(req.headers.accept || '').toLowerCase();
-  return accept.includes('text/event-stream');
-}
-
 function computeCostMinor(usage, priceRow, currency) {
   if (!priceRow) {
     return 0;
@@ -4311,6 +1830,46 @@ app.get('/admin/cache', adminOnly, async (req, res) => {
   });
 });
 
+app.get('/admin/risk-control', adminOnly, (req, res) => {
+  const { accounts } = loadAccountPageData();
+  const groups = store.listGroups();
+  const riskCfg = riskControl.buildConfig();
+  const summary = riskControl.getSummary();
+  const logs = store.listRecentRiskControlLogs(160);
+  const groupIdSet = new Set(groups.map((group) => String(group.id || '').trim()).filter(Boolean));
+  const groupKeyToId = new Map(
+    groups
+      .map((group) => [String(group.groupKey || '').trim(), String(group.id || '').trim()])
+      .filter(([groupKey, groupId]) => groupKey && groupId)
+  );
+  const selectedGroupIds = [];
+  for (const raw of Array.from(riskCfg.groupIds || [])) {
+    const value = String(raw || '').trim();
+    if (!value) {
+      continue;
+    }
+    if (groupIdSet.has(value)) {
+      selectedGroupIds.push(value);
+      continue;
+    }
+    const mappedId = groupKeyToId.get(value);
+    if (mappedId) {
+      selectedGroupIds.push(mappedId);
+    }
+  }
+  res.render('admin-risk-control', {
+    activePage: 'risk-control',
+    settings,
+    stats: buildAdminStats(accounts),
+    notice: req.query.notice || '',
+    groups,
+    riskCfg,
+    summary,
+    logs,
+    selectedGroupIds
+  });
+});
+
 app.get('/admin/logs/stream', adminOnly, (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -4327,6 +1886,80 @@ app.get('/admin/logs/stream', adminOnly, (req, res) => {
     clearInterval(keepalive);
     requestLogClients.delete(res);
   });
+});
+
+app.post('/admin/risk-control/settings', adminOnly, (req, res) => {
+  const currentSettings = store.getSettings();
+  const hasOwn = (key) => Object.prototype.hasOwnProperty.call(req.body || {}, key);
+  const pickWhenMissing = (key, fallback) => {
+    if (!hasOwn(key)) {
+      return String(fallback || '').trim();
+    }
+    return String(req.body[key] || '').trim();
+  };
+  const pickApiKey = (key, fallback) => {
+    if (!hasOwn(key)) {
+      return String(fallback || '').trim();
+    }
+    const value = String(req.body[key] || '').trim();
+    return value || String(fallback || '').trim();
+  };
+
+  const selectedGroupIds = Array.isArray(req.body.riskControlGroupIds)
+    ? req.body.riskControlGroupIds
+    : (req.body.riskControlGroupIds ? [req.body.riskControlGroupIds] : []);
+  const groups = store.listGroups();
+  const groupIdSet = new Set(groups.map((group) => String(group.id || '').trim()).filter(Boolean));
+  const groupKeyToId = new Map(
+    groups
+      .map((group) => [String(group.groupKey || '').trim(), String(group.id || '').trim()])
+      .filter(([groupKey, groupId]) => groupKey && groupId)
+  );
+  const normalizedGroupIds = [...new Set(
+    selectedGroupIds
+      .map((item) => String(item || '').trim())
+      .map((value) => {
+        if (!value) {
+          return '';
+        }
+        if (groupIdSet.has(value)) {
+          return value;
+        }
+        return groupKeyToId.get(value) || '';
+      })
+      .filter(Boolean)
+  )];
+
+  const nextSettings = {
+    riskControlEnabled: parseCheckboxLike(req.body.riskControlEnabled) ? '1' : '0',
+    riskControlMode: normalizeRiskControlMode(req.body.riskControlMode),
+    riskControlScopeMode: normalizeRiskControlScopeMode(req.body.riskControlScopeMode),
+    riskControlGroupIds: normalizedGroupIds.join(','),
+    riskControlSampleRate: String(Math.max(Math.min(Math.floor(safeNumber(req.body.riskControlSampleRate, 100)), 100), 0)),
+    riskControlQueueSize: String(Math.max(Math.min(Math.floor(safeNumber(req.body.riskControlQueueSize, 2000)), 50000), 50)),
+    riskControlWorkerConcurrency: String(Math.max(Math.min(Math.floor(safeNumber(req.body.riskControlWorkerConcurrency, 2)), 12), 1)),
+    riskControlRetentionDays: String(Math.max(Math.min(Math.floor(safeNumber(req.body.riskControlRetentionDays, 30)), 3650), 1)),
+    riskControlBlockMessage: pickWhenMissing('riskControlBlockMessage', currentSettings.riskControlBlockMessage || '内容审查命中风险规则，请调整输入后重试') || '内容审查命中风险规则，请调整输入后重试',
+    riskControlL1Enabled: parseCheckboxLike(req.body.riskControlL1Enabled) ? '1' : '0',
+    riskControlL1BaseUrl: pickWhenMissing('riskControlL1BaseUrl', currentSettings.riskControlL1BaseUrl || 'https://api.openai.com') || 'https://api.openai.com',
+    riskControlL1ApiKey: pickApiKey('riskControlL1ApiKey', currentSettings.riskControlL1ApiKey || ''),
+    riskControlL1Model: pickWhenMissing('riskControlL1Model', currentSettings.riskControlL1Model || 'omni-moderation-latest') || 'omni-moderation-latest',
+    riskControlL1Threshold: String(Math.min(Math.max(safeNumber(req.body.riskControlL1Threshold, 0.7), 0), 1)),
+    riskControlL1TimeoutMs: String(Math.max(Math.min(Math.floor(safeNumber(req.body.riskControlL1TimeoutMs, 5000)), 30000), 500)),
+    riskControlL2Enabled: parseCheckboxLike(req.body.riskControlL2Enabled) ? '1' : '0',
+    riskControlL2BaseUrl: pickWhenMissing('riskControlL2BaseUrl', currentSettings.riskControlL2BaseUrl || 'https://api.openai.com') || 'https://api.openai.com',
+    riskControlL2ApiKey: pickApiKey('riskControlL2ApiKey', currentSettings.riskControlL2ApiKey || ''),
+    riskControlL2Model: pickWhenMissing('riskControlL2Model', currentSettings.riskControlL2Model || 'gpt-4.1-mini') || 'gpt-4.1-mini',
+    riskControlL2Prompt: pickWhenMissing('riskControlL2Prompt', currentSettings.riskControlL2Prompt || ''),
+    riskControlL2Temperature: String(Math.min(Math.max(safeNumber(req.body.riskControlL2Temperature, 0), 0), 2)),
+    riskControlL2MaxTokens: String(Math.max(Math.min(Math.floor(safeNumber(req.body.riskControlL2MaxTokens, 200)), 4096), 16)),
+    riskControlL2TimeoutMs: String(Math.max(Math.min(Math.floor(safeNumber(req.body.riskControlL2TimeoutMs, 12000)), 60000), 500))
+  };
+
+  store.updateSettings(nextSettings);
+  settings = store.getSettings();
+  riskControl.trimHistoryIfNeeded();
+  return adminNoticeRedirect(req, res, '审查网关设置已保存', '/admin/risk-control');
 });
 
 app.post('/admin/settings', adminOnly, (req, res) => {
@@ -4408,7 +2041,7 @@ app.post('/admin/accounts', adminOnly, async (req, res) => {
     store.addAccountModel(accountId, modelName, 'custom');
   }
 
-  const shouldSyncModels = req.body.syncModelsAfterCreate === 'on';
+  const shouldSyncModels = parseCheckboxLike(req.body.syncModelsAfterCreate);
   const groupId = String(req.body.groupId || '').trim();
   const groupWeight = Math.max(Math.floor(safeNumber(req.body.groupWeight, 1)), 1);
   if (groupId) {
@@ -4691,7 +2324,7 @@ app.post('/admin/groups', adminOnly, (req, res) => {
   const name = String(req.body.name || '').trim();
   const groupKey = String(req.body.groupKey || '').trim();
   const description = String(req.body.description || '').trim();
-  const cacheEnabled = req.body.cacheEnabled === 'on';
+  const cacheEnabled = parseCheckboxLike(req.body.cacheEnabled);
   const cacheBaseUrl = normalizeServiceBaseUrl(req.body.cacheBaseUrl || '');
   const cacheAuthToken = String(req.body.cacheAuthToken || '').trim();
   if (!name || !groupKey) {
@@ -4711,7 +2344,7 @@ app.post('/admin/groups', adminOnly, (req, res) => {
     cacheEnabled,
     cacheBaseUrl,
     cacheAuthToken,
-    enabled: req.body.enabled === 'on',
+    enabled: parseCheckboxLike(req.body.enabled),
     createdAt: new Date().toISOString()
   });
   return adminNoticeRedirect(req, res, 'Group created', '/admin/groups');
@@ -4725,7 +2358,7 @@ app.post('/admin/groups/:id/update', adminOnly, (req, res) => {
   const name = String(req.body.name || '').trim();
   const groupKey = String(req.body.groupKey || '').trim();
   const description = String(req.body.description || '').trim();
-  const cacheEnabled = req.body.cacheEnabled === 'on';
+  const cacheEnabled = parseCheckboxLike(req.body.cacheEnabled);
   const cacheBaseUrl = normalizeServiceBaseUrl(req.body.cacheBaseUrl || '');
   const cacheAuthToken = String(req.body.cacheAuthToken || '').trim();
   if (!name || !groupKey) {
@@ -4745,7 +2378,7 @@ app.post('/admin/groups/:id/update', adminOnly, (req, res) => {
     cacheEnabled,
     cacheBaseUrl,
     cacheAuthToken,
-    enabled: req.body.enabled === 'on'
+    enabled: parseCheckboxLike(req.body.enabled)
   });
   return adminNoticeRedirect(req, res, 'Group updated', '/admin/groups');
 });
@@ -4831,7 +2464,7 @@ app.post('/admin/keys/:id/update', adminOnly, (req, res) => {
   store.updateAccessKey(key.id, {
     name,
     groupId: groupId || null,
-    enabled: req.body.enabled === 'on'
+    enabled: parseCheckboxLike(req.body.enabled)
   });
   return adminNoticeRedirect(req, res, 'Access key updated', '/admin/keys');
 });
@@ -5368,6 +3001,26 @@ app.all('/v1/*', async (req, res) => {
     const stickyMs = accountWindowMs(account, settings.globalStickyWindowMs);
     bindResponseContinuationSticky(account, responseId, stickyMs);
   };
+
+  if (jsonBody && typeof jsonBody === 'object') {
+    const riskResult = await riskControl.applyIfNeeded({
+      req,
+      res,
+      jsonBody,
+      requestProvider: requestProvider || normalizeProviderName(account.provider),
+      requestModel: requestModel || upstreamModel || '',
+      authResult,
+      selectedAccountName: account.name
+    });
+    if (riskResult?.blocked) {
+      releaseReservation(selection, account);
+      writeAttemptLog({
+        statusCode: 403,
+        errorDetail: 'Blocked by risk control'
+      });
+      return;
+    }
+  }
 
   const buildRequestInit = (selectedAccount, requestBody) => {
     const selectedProvider = normalizeProviderName(selectedAccount.provider);
