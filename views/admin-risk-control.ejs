@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>审查网关 - Responses Gateway</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/layui@2.9.18/dist/css/layui.css" />
+    <link rel="stylesheet" href="/public/style.css" />
+  </head>
+  <body class="admin-layout">
+    <%- include('partials/admin_nav', { activePage, stats, notice }) %>
+
+    <section class="card">
+      <h2>审查网关设置（L1 + L2）</h2>
+      <p class="muted">L1 使用 moderation，L2 使用可自定义 OpenAI 兼容模型复查；支持 observe（异步）与 pre_block（同步阻断）。</p>
+      <form method="post" action="/admin/risk-control/settings" class="inline-form">
+        <input type="hidden" name="riskControlEnabled" value="0" />
+        <% const riskEnabledSaved = ['1', 'true', 'yes', 'on', 'enabled'].includes(String(settings.riskControlEnabled || '').trim().toLowerCase()); %>
+        <label class="checkline"><input name="riskControlEnabled" value="on" type="checkbox" <%= riskEnabledSaved ? 'checked' : '' %> /> 启用审查网关</label>
+
+        <label>模式</label>
+        <select name="riskControlMode">
+          <option value="observe" <%= riskCfg.mode === 'observe' ? 'selected' : '' %>>observe（异步记录，不阻断）</option>
+          <option value="pre_block" <%= riskCfg.mode === 'pre_block' ? 'selected' : '' %>>pre_block（同步审查，命中阻断）</option>
+          <option value="off" <%= riskCfg.mode === 'off' ? 'selected' : '' %>>off（关闭）</option>
+        </select>
+
+        <label>作用范围</label>
+        <select name="riskControlScopeMode">
+          <option value="all" <%= riskCfg.scopeMode === 'all' ? 'selected' : '' %>>全部分组</option>
+          <option value="selected" <%= riskCfg.scopeMode === 'selected' ? 'selected' : '' %>>仅指定分组</option>
+        </select>
+
+        <label style="grid-column: 1 / -1;">启用分组（仅在“仅指定分组”时生效）</label>
+        <div style="grid-column: 1 / -1;">
+          <input type="hidden" name="riskControlGroupIds_present" value="1" />
+          <input type="hidden" name="riskControlGroupIdsClear" value="1" />
+          <% const selectedSet = new Set(selectedGroupIds || []); %>
+          <div class="chips">
+            <% (groups || []).forEach((group) => { %>
+              <label class="chip" style="display:inline-flex;align-items:center;gap:6px;">
+                <input type="checkbox" name="riskControlGroupIds" value="<%= group.id %>" <%= selectedSet.has(group.id) ? 'checked' : '' %> />
+                <span><%= group.name %> <small>(<%= group.groupKey %>)</small></span>
+              </label>
+            <% }) %>
+            <% if (!(groups || []).length) { %>
+              <span class="muted">暂无分组，请先在“分组池”创建。</span>
+            <% } %>
+          </div>
+        </div>
+
+        <label>采样率（0-100）</label>
+        <input name="riskControlSampleRate" type="number" min="0" max="100" value="<%= riskCfg.sampleRate %>" required />
+
+        <label>阻断提示文案</label>
+        <input name="riskControlBlockMessage" value="<%= settings.riskControlBlockMessage || '内容审查命中风险规则，请调整输入后重试' %>" />
+
+        <label>队列容量</label>
+        <input name="riskControlQueueSize" type="number" min="50" max="50000" value="<%= settings.riskControlQueueSize || '2000' %>" required />
+
+        <label>并发Worker</label>
+        <input name="riskControlWorkerConcurrency" type="number" min="1" max="12" value="<%= settings.riskControlWorkerConcurrency || '2' %>" required />
+
+        <label>日志保留天数</label>
+        <input name="riskControlRetentionDays" type="number" min="1" max="3650" value="<%= settings.riskControlRetentionDays || '30' %>" required />
+
+        <hr style="grid-column: 1 / -1; border: 0; border-top: 1px solid #e5e7eb; margin: 4px 0;" />
+        <h3 style="grid-column: 1 / -1;">L1 Moderation</h3>
+
+        <input type="hidden" name="riskControlL1Enabled" value="0" />
+        <label class="checkline"><input name="riskControlL1Enabled" value="on" type="checkbox" <%= riskCfg.l1.enabled ? 'checked' : '' %> /> 启用 L1</label>
+        <span></span>
+
+        <label>L1 Base URL</label>
+        <input name="riskControlL1BaseUrl" value="<%= settings.riskControlL1BaseUrl || 'https://api.openai.com' %>" />
+
+        <label>L1 API Key</label>
+        <input name="riskControlL1ApiKey" value="<%= settings.riskControlL1ApiKey || '' %>" placeholder="sk-..." />
+
+        <label>L1 Model</label>
+        <input name="riskControlL1Model" value="<%= settings.riskControlL1Model || 'omni-moderation-latest' %>" />
+
+        <label>L1 阈值（0-1）</label>
+        <input name="riskControlL1Threshold" type="number" min="0" max="1" step="0.01" value="<%= settings.riskControlL1Threshold || '0.70' %>" />
+
+        <label>L1 超时(ms)</label>
+        <input name="riskControlL1TimeoutMs" type="number" min="500" max="30000" value="<%= settings.riskControlL1TimeoutMs || '5000' %>" />
+
+        <hr style="grid-column: 1 / -1; border: 0; border-top: 1px solid #e5e7eb; margin: 4px 0;" />
+        <h3 style="grid-column: 1 / -1;">L2 复查（OpenAI兼容）</h3>
+
+        <input type="hidden" name="riskControlL2Enabled" value="0" />
+        <label class="checkline"><input name="riskControlL2Enabled" value="on" type="checkbox" <%= riskCfg.l2.enabled ? 'checked' : '' %> /> 启用 L2</label>
+        <span></span>
+
+        <label>L2 Base URL</label>
+        <input name="riskControlL2BaseUrl" value="<%= settings.riskControlL2BaseUrl || 'https://api.openai.com' %>" />
+
+        <label>L2 API Key</label>
+        <input name="riskControlL2ApiKey" value="<%= settings.riskControlL2ApiKey || '' %>" placeholder="sk-..." />
+
+        <label>L2 Model</label>
+        <input name="riskControlL2Model" value="<%= settings.riskControlL2Model || 'gpt-4.1-mini' %>" />
+
+        <label>L2 Temperature</label>
+        <input name="riskControlL2Temperature" type="number" min="0" max="2" step="0.1" value="<%= settings.riskControlL2Temperature || '0' %>" />
+
+        <label>L2 Max Tokens</label>
+        <input name="riskControlL2MaxTokens" type="number" min="16" max="4096" value="<%= settings.riskControlL2MaxTokens || '200' %>" />
+
+        <label>L2 超时(ms)</label>
+        <input name="riskControlL2TimeoutMs" type="number" min="500" max="60000" value="<%= settings.riskControlL2TimeoutMs || '12000' %>" />
+
+        <label style="grid-column: 1 / -1;">L2 自定义 Prompt（必须输出JSON，建议含 risk/reason/score）</label>
+        <textarea style="grid-column: 1 / -1;" name="riskControlL2Prompt" rows="6"><%= settings.riskControlL2Prompt || '' %></textarea>
+
+        <button type="submit">保存审查设置</button>
+      </form>
+    </section>
+
+    <section class="grid stats">
+      <article class="card">
+        <h3>队列长度</h3>
+        <p><%= Number(summary.queueSize || 0).toLocaleString('zh-CN') %></p>
+      </article>
+      <article class="card">
+        <h3>活跃Worker</h3>
+        <p><%= Number(summary.workerActive || 0).toLocaleString('zh-CN') %></p>
+      </article>
+      <article class="card">
+        <h3>累计处理</h3>
+        <p><%= Number(summary.processed || 0).toLocaleString('zh-CN') %></p>
+      </article>
+      <article class="card">
+        <h3>队列丢弃</h3>
+        <p><%= Number(summary.dropped || 0).toLocaleString('zh-CN') %></p>
+      </article>
+    </section>
+
+    <section class="card">
+      <h2>最近审查日志</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>模式</th>
+              <th>动作</th>
+              <th>状态码</th>
+              <th>分组</th>
+              <th>账号</th>
+              <th>Provider</th>
+              <th>模型</th>
+              <th>L1</th>
+              <th>L2</th>
+              <th>摘要</th>
+              <th>原因</th>
+            </tr>
+          </thead>
+          <tbody>
+            <% logs.forEach((row) => { %>
+              <tr>
+                <td><%= row.at ? new Date(row.at).toLocaleString('zh-CN') : '-' %></td>
+                <td><code><%= row.mode %></code></td>
+                <td><span class="pill <%= row.blocked ? 'log-error' : (row.action === 'flag' ? 'log-warn' : 'log-ok') %>"><%= row.action %></span></td>
+                <td><%= row.statusCode %></td>
+                <td><code><%= row.groupKey || '-' %></code></td>
+                <td><code><%= row.account || '-' %></code></td>
+                <td><code><%= row.provider || '-' %></code></td>
+                <td><code><%= row.model || '-' %></code></td>
+                <td>
+                  <div><%= row.l1Flagged ? 'flag' : 'ok' %></div>
+                  <div class="muted">score=<%= Number(row.l1Score || 0).toFixed(3) %> <%= row.l1Category || '-' %></div>
+                  <% if (row.l1Error) { %><div class="log-error-text"><%= row.l1Error %></div><% } %>
+                </td>
+                <td>
+                  <div><%= row.l2Flagged ? 'flag' : 'ok' %></div>
+                  <div class="muted">score=<%= Number(row.l2Score || 0).toFixed(3) %></div>
+                  <% if (row.l2Reason) { %><div><%= row.l2Reason %></div><% } %>
+                  <% if (row.l2Error) { %><div class="log-error-text"><%= row.l2Error %></div><% } %>
+                </td>
+                <td class="log-error-text"><%= row.excerpt || '-' %></td>
+                <td class="log-error-text"><%= row.finalReason || '-' %></td>
+              </tr>
+            <% }) %>
+            <% if (!logs.length) { %>
+              <tr><td colspan="12" class="muted">暂无审查日志</td></tr>
+            <% } %>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </body>
+</html>

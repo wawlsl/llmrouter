@@ -120,16 +120,32 @@ function safeNumber(value, fallback = 0) {
 }
 
 function parseCheckboxLike(value) {
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      if (parseCheckboxLike(item)) {
-        return true;
-      }
+  const normalizeCheckboxToken = (input) => {
+    const text = String(input ?? '').trim().toLowerCase();
+    if (!text) {
+      return false;
     }
-    return false;
+    if (['1', 'true', 'yes', 'on', 'enabled'].includes(text)) {
+      return true;
+    }
+    if (['0', 'false', 'no', 'off', 'disabled'].includes(text)) {
+      return false;
+    }
+    return null;
+  };
+
+  if (Array.isArray(value)) {
+    let resolved = null;
+    for (const item of value) {
+      const token = normalizeCheckboxToken(item);
+      if (token === null) {
+        continue;
+      }
+      resolved = token;
+    }
+    return resolved === true;
   }
-  const text = String(value ?? '').trim().toLowerCase();
-  return ['1', 'true', 'yes', 'on', 'enabled'].includes(text);
+  return normalizeCheckboxToken(value) === true;
 }
 
 function parseOptionalRate(value) {
@@ -1891,6 +1907,18 @@ app.get('/admin/logs/stream', adminOnly, (req, res) => {
 app.post('/admin/risk-control/settings', adminOnly, (req, res) => {
   const currentSettings = store.getSettings();
   const hasOwn = (key) => Object.prototype.hasOwnProperty.call(req.body || {}, key);
+  const currentBool = (key, fallback = false) => {
+    if (!Object.prototype.hasOwnProperty.call(currentSettings, key)) {
+      return fallback;
+    }
+    return parseCheckboxLike(currentSettings[key]);
+  };
+  const pickCheckbox = (key, fallback = false) => {
+    if (!hasOwn(key)) {
+      return fallback;
+    }
+    return parseCheckboxLike(req.body[key]);
+  };
   const pickWhenMissing = (key, fallback) => {
     if (!hasOwn(key)) {
       return String(fallback || '').trim();
@@ -1904,7 +1932,15 @@ app.post('/admin/risk-control/settings', adminOnly, (req, res) => {
     const value = String(req.body[key] || '').trim();
     return value || String(fallback || '').trim();
   };
+  const pickNumberWhenMissing = (key, fallback) => {
+    if (!hasOwn(key)) {
+      return safeNumber(fallback, 0);
+    }
+    return safeNumber(req.body[key], safeNumber(fallback, 0));
+  };
 
+  const hasGroupSelectionField = hasOwn('riskControlGroupIds_present') || hasOwn('riskControlGroupIds');
+  const shouldClearGroupSelection = parseCheckboxLike(req.body.riskControlGroupIdsClear);
   const selectedGroupIds = Array.isArray(req.body.riskControlGroupIds)
     ? req.body.riskControlGroupIds
     : (req.body.riskControlGroupIds ? [req.body.riskControlGroupIds] : []);
@@ -1931,29 +1967,39 @@ app.post('/admin/risk-control/settings', adminOnly, (req, res) => {
   )];
 
   const nextSettings = {
-    riskControlEnabled: parseCheckboxLike(req.body.riskControlEnabled) ? '1' : '0',
-    riskControlMode: normalizeRiskControlMode(req.body.riskControlMode),
-    riskControlScopeMode: normalizeRiskControlScopeMode(req.body.riskControlScopeMode),
-    riskControlGroupIds: normalizedGroupIds.join(','),
-    riskControlSampleRate: String(Math.max(Math.min(Math.floor(safeNumber(req.body.riskControlSampleRate, 100)), 100), 0)),
-    riskControlQueueSize: String(Math.max(Math.min(Math.floor(safeNumber(req.body.riskControlQueueSize, 2000)), 50000), 50)),
-    riskControlWorkerConcurrency: String(Math.max(Math.min(Math.floor(safeNumber(req.body.riskControlWorkerConcurrency, 2)), 12), 1)),
-    riskControlRetentionDays: String(Math.max(Math.min(Math.floor(safeNumber(req.body.riskControlRetentionDays, 30)), 3650), 1)),
+    riskControlEnabled: pickCheckbox('riskControlEnabled', currentBool('riskControlEnabled', false)) ? '1' : '0',
+    riskControlMode: hasOwn('riskControlMode')
+      ? normalizeRiskControlMode(req.body.riskControlMode)
+      : normalizeRiskControlMode(currentSettings.riskControlMode),
+    riskControlScopeMode: hasOwn('riskControlScopeMode')
+      ? normalizeRiskControlScopeMode(req.body.riskControlScopeMode)
+      : normalizeRiskControlScopeMode(currentSettings.riskControlScopeMode),
+    riskControlGroupIds: shouldClearGroupSelection
+      ? normalizedGroupIds.join(',')
+      : (
+        hasGroupSelectionField
+          ? normalizedGroupIds.join(',')
+          : String(currentSettings.riskControlGroupIds || '')
+      ),
+    riskControlSampleRate: String(Math.max(Math.min(Math.floor(pickNumberWhenMissing('riskControlSampleRate', currentSettings.riskControlSampleRate ?? 100)), 100), 0)),
+    riskControlQueueSize: String(Math.max(Math.min(Math.floor(pickNumberWhenMissing('riskControlQueueSize', currentSettings.riskControlQueueSize ?? 2000)), 50000), 50)),
+    riskControlWorkerConcurrency: String(Math.max(Math.min(Math.floor(pickNumberWhenMissing('riskControlWorkerConcurrency', currentSettings.riskControlWorkerConcurrency ?? 2)), 12), 1)),
+    riskControlRetentionDays: String(Math.max(Math.min(Math.floor(pickNumberWhenMissing('riskControlRetentionDays', currentSettings.riskControlRetentionDays ?? 30)), 3650), 1)),
     riskControlBlockMessage: pickWhenMissing('riskControlBlockMessage', currentSettings.riskControlBlockMessage || '内容审查命中风险规则，请调整输入后重试') || '内容审查命中风险规则，请调整输入后重试',
-    riskControlL1Enabled: parseCheckboxLike(req.body.riskControlL1Enabled) ? '1' : '0',
+    riskControlL1Enabled: pickCheckbox('riskControlL1Enabled', currentBool('riskControlL1Enabled', true)) ? '1' : '0',
     riskControlL1BaseUrl: pickWhenMissing('riskControlL1BaseUrl', currentSettings.riskControlL1BaseUrl || 'https://api.openai.com') || 'https://api.openai.com',
     riskControlL1ApiKey: pickApiKey('riskControlL1ApiKey', currentSettings.riskControlL1ApiKey || ''),
     riskControlL1Model: pickWhenMissing('riskControlL1Model', currentSettings.riskControlL1Model || 'omni-moderation-latest') || 'omni-moderation-latest',
-    riskControlL1Threshold: String(Math.min(Math.max(safeNumber(req.body.riskControlL1Threshold, 0.7), 0), 1)),
-    riskControlL1TimeoutMs: String(Math.max(Math.min(Math.floor(safeNumber(req.body.riskControlL1TimeoutMs, 5000)), 30000), 500)),
-    riskControlL2Enabled: parseCheckboxLike(req.body.riskControlL2Enabled) ? '1' : '0',
+    riskControlL1Threshold: String(Math.min(Math.max(pickNumberWhenMissing('riskControlL1Threshold', currentSettings.riskControlL1Threshold ?? 0.7), 0), 1)),
+    riskControlL1TimeoutMs: String(Math.max(Math.min(Math.floor(pickNumberWhenMissing('riskControlL1TimeoutMs', currentSettings.riskControlL1TimeoutMs ?? 5000)), 30000), 500)),
+    riskControlL2Enabled: pickCheckbox('riskControlL2Enabled', currentBool('riskControlL2Enabled', false)) ? '1' : '0',
     riskControlL2BaseUrl: pickWhenMissing('riskControlL2BaseUrl', currentSettings.riskControlL2BaseUrl || 'https://api.openai.com') || 'https://api.openai.com',
     riskControlL2ApiKey: pickApiKey('riskControlL2ApiKey', currentSettings.riskControlL2ApiKey || ''),
     riskControlL2Model: pickWhenMissing('riskControlL2Model', currentSettings.riskControlL2Model || 'gpt-4.1-mini') || 'gpt-4.1-mini',
     riskControlL2Prompt: pickWhenMissing('riskControlL2Prompt', currentSettings.riskControlL2Prompt || ''),
-    riskControlL2Temperature: String(Math.min(Math.max(safeNumber(req.body.riskControlL2Temperature, 0), 0), 2)),
-    riskControlL2MaxTokens: String(Math.max(Math.min(Math.floor(safeNumber(req.body.riskControlL2MaxTokens, 200)), 4096), 16)),
-    riskControlL2TimeoutMs: String(Math.max(Math.min(Math.floor(safeNumber(req.body.riskControlL2TimeoutMs, 12000)), 60000), 500))
+    riskControlL2Temperature: String(Math.min(Math.max(pickNumberWhenMissing('riskControlL2Temperature', currentSettings.riskControlL2Temperature ?? 0), 0), 2)),
+    riskControlL2MaxTokens: String(Math.max(Math.min(Math.floor(pickNumberWhenMissing('riskControlL2MaxTokens', currentSettings.riskControlL2MaxTokens ?? 200)), 4096), 16)),
+    riskControlL2TimeoutMs: String(Math.max(Math.min(Math.floor(pickNumberWhenMissing('riskControlL2TimeoutMs', currentSettings.riskControlL2TimeoutMs ?? 12000)), 60000), 500))
   };
 
   store.updateSettings(nextSettings);
