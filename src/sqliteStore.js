@@ -42,8 +42,34 @@ const defaultSettings = {
   globalStickyWindowMs: 6 * 60 * 60 * 1000,
   defaultBaseUrl: 'https://api.openai.com',
   sessionTtlMs: 24 * 60 * 60 * 1000,
-  defaultCurrency: 'USD'
+  defaultCurrency: 'USD',
+  debugAutoMode: 'off',
+  riskControlEnabled: 'off',
+  riskControlScopeMode: 'all',
+  riskControlGroupIds: '',
+  riskControlMode: 'observe',
+  riskControlSampleRate: '100',
+  riskControlL1Enabled: '1',
+  riskControlL1BaseUrl: 'https://api.openai.com',
+  riskControlL1Model: 'omni-moderation-latest',
+  riskControlL1ApiKey: '',
+  riskControlL1Threshold: '0.70',
+  riskControlL1TimeoutMs: '5000',
+  riskControlL2Enabled: '0',
+  riskControlL2BaseUrl: 'https://api.openai.com',
+  riskControlL2Model: 'gpt-4.1-mini',
+  riskControlL2ApiKey: '',
+  riskControlL2Prompt: 'You are a strict safety reviewer. Return JSON only: {\"risk\":\"allow|block\",\"reason\":\"...\",\"score\":0.0}.',
+  riskControlL2Temperature: '0',
+  riskControlL2MaxTokens: '200',
+  riskControlL2TimeoutMs: '12000',
+  riskControlQueueSize: '2000',
+  riskControlWorkerConcurrency: '2',
+  riskControlBlockMessage: '内容审查命中风险规则，请调整输入后重试',
+  riskControlRetentionDays: '30'
 };
+
+export const DEFAULT_RISK_CONTROL_L2_PROMPT = defaultSettings.riskControlL2Prompt;
 
 const numericSettings = new Set([
   'globalStickyWindowMs',
@@ -192,19 +218,16 @@ export function createStore(dbPath) {
     );
   `);
 
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS pool_groups (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      group_key TEXT NOT NULL UNIQUE,
-      description TEXT NOT NULL DEFAULT '',
-      cache_enabled INTEGER NOT NULL DEFAULT 0,
-      cache_base_url TEXT NOT NULL DEFAULT '',
-      cache_auth_token TEXT NOT NULL DEFAULT '',
-      enabled INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT NOT NULL
-    );
-  `);
+	  db.exec(`
+	    CREATE TABLE IF NOT EXISTS pool_groups (
+	      id TEXT PRIMARY KEY,
+	      name TEXT NOT NULL,
+	      group_key TEXT NOT NULL UNIQUE,
+	      description TEXT NOT NULL DEFAULT '',
+	      enabled INTEGER NOT NULL DEFAULT 1,
+	      created_at TEXT NOT NULL
+	    );
+	  `);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS group_members (
@@ -264,15 +287,52 @@ export function createStore(dbPath) {
       input_tokens INTEGER NOT NULL DEFAULT 0,
       output_tokens INTEGER NOT NULL DEFAULT 0,
       cached_tokens INTEGER NOT NULL DEFAULT 0,
+      gateway_cache TEXT NOT NULL DEFAULT '',
+      upstream_cache TEXT NOT NULL DEFAULT '',
+      cache_layer TEXT NOT NULL DEFAULT '',
       cost_minor INTEGER NOT NULL DEFAULT 0,
       currency TEXT NOT NULL DEFAULT 'USD',
       duration_ms INTEGER NOT NULL DEFAULT 0,
       error TEXT NOT NULL DEFAULT '',
+      debug_info TEXT NOT NULL DEFAULT '',
       compat_unsupported TEXT NOT NULL DEFAULT '',
       attempts INTEGER NOT NULL DEFAULT 1,
       switches INTEGER NOT NULL DEFAULT 0,
       retry_reason TEXT NOT NULL DEFAULT '',
       sticky_hit INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS risk_control_logs (
+      id TEXT PRIMARY KEY,
+      at TEXT NOT NULL,
+      request_id TEXT NOT NULL DEFAULT '',
+      group_key TEXT NOT NULL DEFAULT '',
+      access_key_id TEXT NOT NULL DEFAULT '',
+      provider TEXT NOT NULL DEFAULT '',
+      path TEXT NOT NULL DEFAULT '',
+      model TEXT NOT NULL DEFAULT '',
+      account TEXT NOT NULL DEFAULT '',
+      mode TEXT NOT NULL DEFAULT 'observe',
+      action TEXT NOT NULL DEFAULT 'allow',
+      blocked INTEGER NOT NULL DEFAULT 0,
+      sampled INTEGER NOT NULL DEFAULT 1,
+      input_hash TEXT NOT NULL DEFAULT '',
+      excerpt TEXT NOT NULL DEFAULT '',
+      l1_flagged INTEGER NOT NULL DEFAULT 0,
+      l1_score REAL NOT NULL DEFAULT 0,
+      l1_category TEXT NOT NULL DEFAULT '',
+      l1_error TEXT NOT NULL DEFAULT '',
+      l1_latency_ms INTEGER NOT NULL DEFAULT 0,
+      l2_flagged INTEGER NOT NULL DEFAULT 0,
+      l2_score REAL NOT NULL DEFAULT 0,
+      l2_reason TEXT NOT NULL DEFAULT '',
+      l2_raw TEXT NOT NULL DEFAULT '',
+      l2_error TEXT NOT NULL DEFAULT '',
+      l2_latency_ms INTEGER NOT NULL DEFAULT 0,
+      final_reason TEXT NOT NULL DEFAULT '',
+      status_code INTEGER NOT NULL DEFAULT 0
     );
   `);
 
@@ -286,6 +346,9 @@ export function createStore(dbPath) {
   db.exec('CREATE INDEX IF NOT EXISTS idx_sticky_expires ON sticky_bindings(expires_at);');
   db.exec('CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires ON admin_sessions(expires_at);');
   db.exec('CREATE INDEX IF NOT EXISTS idx_request_logs_at ON request_logs(at DESC);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_risk_control_logs_at ON risk_control_logs(at DESC);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_risk_control_logs_action_at ON risk_control_logs(action, at DESC);');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_risk_control_logs_group_at ON risk_control_logs(group_key, at DESC);');
 
   function ensureColumn(tableName, columnName, definitionSql) {
     const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
@@ -301,11 +364,16 @@ export function createStore(dbPath) {
   ensureColumn('accounts', 'used_requests_2', 'used_requests_2 INTEGER NOT NULL DEFAULT 0');
   ensureColumn('accounts', 'provider', "provider TEXT NOT NULL DEFAULT 'openai'");
   ensureColumn('accounts', 'force_responses_compat', 'force_responses_compat INTEGER NOT NULL DEFAULT 0');
-  ensureColumn('pool_groups', 'cache_enabled', 'cache_enabled INTEGER NOT NULL DEFAULT 0');
-  ensureColumn('pool_groups', 'cache_base_url', "cache_base_url TEXT NOT NULL DEFAULT ''");
-  ensureColumn('pool_groups', 'cache_auth_token', "cache_auth_token TEXT NOT NULL DEFAULT ''");
+  ensureColumn('request_logs', 'gateway_cache', "gateway_cache TEXT NOT NULL DEFAULT ''");
+  ensureColumn('request_logs', 'upstream_cache', "upstream_cache TEXT NOT NULL DEFAULT ''");
+  ensureColumn('request_logs', 'cache_layer', "cache_layer TEXT NOT NULL DEFAULT ''");
+  ensureColumn('request_logs', 'debug_info', "debug_info TEXT NOT NULL DEFAULT ''");
 
   const upsertSettingStmt = db.prepare(`
+    INSERT INTO settings(key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO NOTHING
+  `);
+  const setSettingStmt = db.prepare(`
     INSERT INTO settings(key, value) VALUES (?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
   `);
@@ -501,50 +569,43 @@ export function createStore(dbPath) {
     WHERE provider = ? AND model_name = ?
   `);
 
-  const listGroupsStmt = db.prepare(`
-    SELECT
-      id, name, group_key, description,
-      cache_enabled, cache_base_url, cache_auth_token,
-      enabled, created_at
-    FROM pool_groups
-    ORDER BY created_at DESC
-  `);
-  const groupByIdStmt = db.prepare(`
-    SELECT
-      id, name, group_key, description,
-      cache_enabled, cache_base_url, cache_auth_token,
-      enabled, created_at
-    FROM pool_groups
-    WHERE id = ?
-  `);
-  const groupByKeyStmt = db.prepare(`
-    SELECT
-      id, name, group_key, description,
-      cache_enabled, cache_base_url, cache_auth_token,
-      enabled, created_at
-    FROM pool_groups
-    WHERE group_key = ?
-  `);
-  const insertGroupStmt = db.prepare(`
-    INSERT INTO pool_groups(
-      id, name, group_key, description,
-      cache_enabled, cache_base_url, cache_auth_token,
-      enabled, created_at
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  const updateGroupStmt = db.prepare(`
-    UPDATE pool_groups
-    SET
-      name = ?,
-      group_key = ?,
-      description = ?,
-      cache_enabled = ?,
-      cache_base_url = ?,
-      cache_auth_token = ?,
-      enabled = ?
-    WHERE id = ?
-  `);
+	  const listGroupsStmt = db.prepare(`
+	    SELECT
+	      id, name, group_key, description,
+	      enabled, created_at
+	    FROM pool_groups
+	    ORDER BY created_at DESC
+	  `);
+	  const groupByIdStmt = db.prepare(`
+	    SELECT
+	      id, name, group_key, description,
+	      enabled, created_at
+	    FROM pool_groups
+	    WHERE id = ?
+	  `);
+	  const groupByKeyStmt = db.prepare(`
+	    SELECT
+	      id, name, group_key, description,
+	      enabled, created_at
+	    FROM pool_groups
+	    WHERE group_key = ?
+	  `);
+	  const insertGroupStmt = db.prepare(`
+	    INSERT INTO pool_groups(
+	      id, name, group_key, description,
+	      enabled, created_at
+	    )
+	    VALUES (?, ?, ?, ?, ?, ?)
+	  `);
+	  const updateGroupStmt = db.prepare(`
+	    UPDATE pool_groups
+	    SET
+	      name = ?,
+	      group_key = ?,
+	      description = ?,
+	      enabled = ?
+	    WHERE id = ?
+	  `);
   const deleteGroupStmt = db.prepare('DELETE FROM pool_groups WHERE id = ?');
 
   const listGroupMembersStmt = db.prepare(`
@@ -664,10 +725,10 @@ export function createStore(dbPath) {
     INSERT INTO request_logs(
       id, at, method, path, endpoint, provider, account, model, request_model,
       group_key, access_key_id, status_code, tokens, input_tokens, output_tokens,
-      cached_tokens, cost_minor, currency, duration_ms, error, compat_unsupported,
-      attempts, switches, retry_reason, sticky_hit
+      cached_tokens, gateway_cache, upstream_cache, cache_layer, cost_minor, currency, duration_ms,
+      error, debug_info, compat_unsupported, attempts, switches, retry_reason, sticky_hit
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const listRecentRequestLogsStmt = db.prepare(`
     SELECT
@@ -687,10 +748,14 @@ export function createStore(dbPath) {
       input_tokens,
       output_tokens,
       cached_tokens,
+      gateway_cache,
+      upstream_cache,
+      cache_layer,
       cost_minor,
       currency,
       duration_ms,
       error,
+      debug_info,
       compat_unsupported,
       attempts,
       switches,
@@ -704,6 +769,33 @@ export function createStore(dbPath) {
     DELETE FROM request_logs
     WHERE id IN (
       SELECT id FROM request_logs
+      ORDER BY at DESC, id DESC
+      LIMIT -1 OFFSET ?
+    )
+  `);
+  const insertRiskControlLogStmt = db.prepare(`
+    INSERT INTO risk_control_logs(
+      id, at, request_id, group_key, access_key_id, provider, path, model, account,
+      mode, action, blocked, sampled, input_hash, excerpt, l1_flagged, l1_score, l1_category,
+      l1_error, l1_latency_ms, l2_flagged, l2_score, l2_reason, l2_raw, l2_error, l2_latency_ms,
+      final_reason, status_code
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const listRecentRiskControlLogsStmt = db.prepare(`
+    SELECT
+      id, at, request_id, group_key, access_key_id, provider, path, model, account,
+      mode, action, blocked, sampled, input_hash, excerpt, l1_flagged, l1_score, l1_category,
+      l1_error, l1_latency_ms, l2_flagged, l2_score, l2_reason, l2_raw, l2_error, l2_latency_ms,
+      final_reason, status_code
+    FROM risk_control_logs
+    ORDER BY at DESC, id DESC
+    LIMIT ?
+  `);
+  const trimRiskControlLogsStmt = db.prepare(`
+    DELETE FROM risk_control_logs
+    WHERE id IN (
+      SELECT id FROM risk_control_logs
       ORDER BY at DESC, id DESC
       LIMIT -1 OFFSET ?
     )
@@ -744,7 +836,7 @@ export function createStore(dbPath) {
     const entries = Object.entries(partialSettings);
     runInTransaction(() => {
       for (const [key, value] of entries) {
-        upsertSettingStmt.run(key, String(value));
+        setSettingStmt.run(key, String(value));
       }
     });
   }
@@ -1309,10 +1401,14 @@ export function createStore(dbPath) {
       Number(entry.inputTokens) || 0,
       Number(entry.outputTokens) || 0,
       Number(entry.cachedTokens) || 0,
+      entry.gatewayCache || '',
+      entry.upstreamCache || '',
+      entry.cacheLayer || '',
       Number(entry.costMinor) || 0,
       entry.currency || 'USD',
       Number(entry.durationMs) || 0,
       entry.error || '',
+      entry.debugInfo || '',
       entry.compatUnsupported || '',
       Number(entry.attempts) || 1,
       Number(entry.switches) || 0,
@@ -1340,10 +1436,14 @@ export function createStore(dbPath) {
       inputTokens: row.input_tokens,
       outputTokens: row.output_tokens,
       cachedTokens: row.cached_tokens,
+      gatewayCache: row.gateway_cache,
+      upstreamCache: row.upstream_cache,
+      cacheLayer: row.cache_layer,
       costMinor: row.cost_minor,
       currency: row.currency,
       durationMs: row.duration_ms,
       error: row.error,
+      debugInfo: row.debug_info || '',
       compatUnsupported: row.compat_unsupported,
       attempts: row.attempts,
       switches: row.switches,
@@ -1357,39 +1457,105 @@ export function createStore(dbPath) {
     trimRequestLogsStmt.run(safeMax);
   }
 
-  function listGroups() {
-    return listGroupsStmt.all().map((row) => ({
+  function appendRiskControlLog(entry) {
+    insertRiskControlLogStmt.run(
+      entry.id,
+      entry.at,
+      entry.requestId || '',
+      entry.groupKey || '',
+      entry.accessKeyId || '',
+      entry.provider || '',
+      entry.path || '',
+      entry.model || '',
+      entry.account || '',
+      entry.mode || 'observe',
+      entry.action || 'allow',
+      entry.blocked ? 1 : 0,
+      entry.sampled === false ? 0 : 1,
+      entry.inputHash || '',
+      entry.excerpt || '',
+      entry.l1Flagged ? 1 : 0,
+      Number(entry.l1Score) || 0,
+      entry.l1Category || '',
+      entry.l1Error || '',
+      Number(entry.l1LatencyMs) || 0,
+      entry.l2Flagged ? 1 : 0,
+      Number(entry.l2Score) || 0,
+      entry.l2Reason || '',
+      entry.l2Raw || '',
+      entry.l2Error || '',
+      Number(entry.l2LatencyMs) || 0,
+      entry.finalReason || '',
+      Number(entry.statusCode) || 0
+    );
+  }
+
+  function listRecentRiskControlLogs(limit = 120) {
+    const safeLimit = Math.max(Math.floor(Number(limit) || 120), 1);
+    return listRecentRiskControlLogsStmt.all(safeLimit).map((row) => ({
       id: row.id,
-      name: row.name,
+      at: row.at,
+      requestId: row.request_id,
       groupKey: row.group_key,
-      description: row.description,
-      cacheEnabled: row.cache_enabled === 1,
-      cacheBaseUrl: row.cache_base_url || '',
-      cacheAuthToken: row.cache_auth_token || '',
-      enabled: row.enabled === 1,
-      createdAt: row.created_at
+      accessKeyId: row.access_key_id,
+      provider: row.provider,
+      path: row.path,
+      model: row.model,
+      account: row.account,
+      mode: row.mode,
+      action: row.action,
+      blocked: row.blocked === 1,
+      sampled: row.sampled === 1,
+      inputHash: row.input_hash,
+      excerpt: row.excerpt,
+      l1Flagged: row.l1_flagged === 1,
+      l1Score: Number(row.l1_score) || 0,
+      l1Category: row.l1_category,
+      l1Error: row.l1_error,
+      l1LatencyMs: row.l1_latency_ms,
+      l2Flagged: row.l2_flagged === 1,
+      l2Score: Number(row.l2_score) || 0,
+      l2Reason: row.l2_reason,
+      l2Raw: row.l2_raw,
+      l2Error: row.l2_error,
+      l2LatencyMs: row.l2_latency_ms,
+      finalReason: row.final_reason,
+      statusCode: row.status_code
     }));
   }
 
-  function getGroupById(groupId) {
+  function trimRiskControlLogs(maxRows = 5000) {
+    const safeMax = Math.max(Math.floor(Number(maxRows) || 5000), 1);
+    trimRiskControlLogsStmt.run(safeMax);
+  }
+
+	function listGroups() {
+	  return listGroupsStmt.all().map((row) => ({
+	    id: row.id,
+	    name: row.name,
+	    groupKey: row.group_key,
+	    description: row.description,
+	    enabled: row.enabled === 1,
+	    createdAt: row.created_at
+	  }));
+	}
+
+	function getGroupById(groupId) {
     const row = groupByIdStmt.get(groupId);
     if (!row) {
       return null;
     }
-    return {
-      id: row.id,
-      name: row.name,
-      groupKey: row.group_key,
-      description: row.description,
-      cacheEnabled: row.cache_enabled === 1,
-      cacheBaseUrl: row.cache_base_url || '',
-      cacheAuthToken: row.cache_auth_token || '',
-      enabled: row.enabled === 1,
-      createdAt: row.created_at
-    };
-  }
+	  return {
+	    id: row.id,
+	    name: row.name,
+	    groupKey: row.group_key,
+	    description: row.description,
+	    enabled: row.enabled === 1,
+	    createdAt: row.created_at
+	  };
+	}
 
-  function getGroupByKey(groupKey) {
+	function getGroupByKey(groupKey) {
     const key = safeModelName(groupKey);
     if (!key) {
       return null;
@@ -1398,45 +1564,36 @@ export function createStore(dbPath) {
     if (!row) {
       return null;
     }
-    return {
-      id: row.id,
-      name: row.name,
-      groupKey: row.group_key,
-      description: row.description,
-      cacheEnabled: row.cache_enabled === 1,
-      cacheBaseUrl: row.cache_base_url || '',
-      cacheAuthToken: row.cache_auth_token || '',
-      enabled: row.enabled === 1,
-      createdAt: row.created_at
-    };
-  }
+	  return {
+	    id: row.id,
+	    name: row.name,
+	    groupKey: row.group_key,
+	    description: row.description,
+	    enabled: row.enabled === 1,
+	    createdAt: row.created_at
+	  };
+	}
 
-  function createGroup(group) {
-    insertGroupStmt.run(
-      group.id,
-      group.name,
-      group.groupKey,
-      group.description || '',
-      group.cacheEnabled ? 1 : 0,
-      group.cacheBaseUrl || '',
-      group.cacheAuthToken || '',
-      group.enabled ? 1 : 0,
-      group.createdAt || new Date().toISOString()
-    );
-  }
+	function createGroup(group) {
+	  insertGroupStmt.run(
+	    group.id,
+	    group.name,
+	    group.groupKey,
+	    group.description || '',
+	    group.enabled ? 1 : 0,
+	    group.createdAt || new Date().toISOString()
+	  );
+	}
 
-  function updateGroup(groupId, group) {
-    updateGroupStmt.run(
-      group.name,
-      group.groupKey,
-      group.description || '',
-      group.cacheEnabled ? 1 : 0,
-      group.cacheBaseUrl || '',
-      group.cacheAuthToken || '',
-      group.enabled ? 1 : 0,
-      groupId
-    );
-  }
+	function updateGroup(groupId, group) {
+	  updateGroupStmt.run(
+	    group.name,
+	    group.groupKey,
+	    group.description || '',
+	    group.enabled ? 1 : 0,
+	    groupId
+	  );
+	}
 
   function deleteGroup(groupId) {
     deleteGroupStmt.run(groupId);
@@ -1530,6 +1687,9 @@ export function createStore(dbPath) {
     appendRequestLog,
     listRecentRequestLogs,
     trimRequestLogs,
+    appendRiskControlLog,
+    listRecentRiskControlLogs,
+    trimRiskControlLogs,
     close
   };
 }

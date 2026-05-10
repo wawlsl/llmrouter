@@ -24,6 +24,7 @@ import {
   normalizeRiskControlMode,
   normalizeRiskControlScopeMode
 } from './riskControl.js';
+import { DEFAULT_RISK_CONTROL_L2_PROMPT } from './sqliteStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -135,7 +136,7 @@ function parseCheckboxLike(value) {
   };
 
   if (Array.isArray(value)) {
-    let resolved = null;
+    let resolved = false;
     for (const item of value) {
       const token = normalizeCheckboxToken(item);
       if (token === null) {
@@ -1996,7 +1997,10 @@ app.post('/admin/risk-control/settings', adminOnly, (req, res) => {
     riskControlL2BaseUrl: pickWhenMissing('riskControlL2BaseUrl', currentSettings.riskControlL2BaseUrl || 'https://api.openai.com') || 'https://api.openai.com',
     riskControlL2ApiKey: pickApiKey('riskControlL2ApiKey', currentSettings.riskControlL2ApiKey || ''),
     riskControlL2Model: pickWhenMissing('riskControlL2Model', currentSettings.riskControlL2Model || 'gpt-4.1-mini') || 'gpt-4.1-mini',
-    riskControlL2Prompt: pickWhenMissing('riskControlL2Prompt', currentSettings.riskControlL2Prompt || ''),
+    riskControlL2Prompt: pickWhenMissing(
+      'riskControlL2Prompt',
+      currentSettings.riskControlL2Prompt || DEFAULT_RISK_CONTROL_L2_PROMPT
+    ) || DEFAULT_RISK_CONTROL_L2_PROMPT,
     riskControlL2Temperature: String(Math.min(Math.max(pickNumberWhenMissing('riskControlL2Temperature', currentSettings.riskControlL2Temperature ?? 0), 0), 2)),
     riskControlL2MaxTokens: String(Math.max(Math.min(Math.floor(pickNumberWhenMissing('riskControlL2MaxTokens', currentSettings.riskControlL2MaxTokens ?? 200)), 4096), 16)),
     riskControlL2TimeoutMs: String(Math.max(Math.min(Math.floor(pickNumberWhenMissing('riskControlL2TimeoutMs', currentSettings.riskControlL2TimeoutMs ?? 12000)), 60000), 500))

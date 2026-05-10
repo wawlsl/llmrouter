@@ -112,7 +112,7 @@
         <input name="riskControlL2TimeoutMs" type="number" min="500" max="60000" value="<%= settings.riskControlL2TimeoutMs || '12000' %>" />
 
         <label style="grid-column: 1 / -1;">L2 自定义 Prompt（必须输出JSON，建议含 risk/reason/score）</label>
-        <textarea style="grid-column: 1 / -1;" name="riskControlL2Prompt" rows="6"><%= settings.riskControlL2Prompt || '' %></textarea>
+        <textarea style="grid-column: 1 / -1;" name="riskControlL2Prompt" rows="6"><%= settings.riskControlL2Prompt || 'You are a strict safety reviewer. Return JSON only: {"risk":"allow|block","reason":"...","score":0.0}.' %></textarea>
 
         <button type="submit">保存审查设置</button>
       </form>
