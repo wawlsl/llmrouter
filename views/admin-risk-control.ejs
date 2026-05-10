@@ -13,10 +13,13 @@
     <section class="card">
       <h2>审查网关设置（L1 + L2）</h2>
       <p class="muted">L1 使用 moderation，L2 使用可自定义 OpenAI 兼容模型复查；支持 observe（异步）与 pre_block（同步阻断）。</p>
-      <form method="post" action="/admin/risk-control/settings" class="inline-form">
-        <input type="hidden" name="riskControlEnabled" value="0" />
+      <form method="post" action="/admin/risk-control/settings" class="inline-form risk-control-form" data-native-switch-form="1">
         <% const riskEnabledSaved = ['1', 'true', 'yes', 'on', 'enabled'].includes(String(settings.riskControlEnabled || '').trim().toLowerCase()); %>
-        <label class="checkline"><input name="riskControlEnabled" value="on" type="checkbox" <%= riskEnabledSaved ? 'checked' : '' %> /> 启用审查网关</label>
+        <label class="checkline native-switchline">
+          <input type="hidden" name="riskControlEnabled" value="<%= riskEnabledSaved ? '1' : '0' %>" data-switch-hidden="1" />
+          <input value="1" type="checkbox" class="native-switch" lay-ignore="1" data-switch-proxy="riskControlEnabled" <%= riskEnabledSaved ? 'checked' : '' %> />
+          <span>启用审查网关</span>
+        </label>
 
         <label>模式</label>
         <select name="riskControlMode">
@@ -38,8 +41,15 @@
           <% const selectedSet = new Set(selectedGroupIds || []); %>
           <div class="chips">
             <% (groups || []).forEach((group) => { %>
-              <label class="chip" style="display:inline-flex;align-items:center;gap:6px;">
-                <input type="checkbox" name="riskControlGroupIds" value="<%= group.id %>" <%= selectedSet.has(group.id) ? 'checked' : '' %> />
+              <label class="chip risk-group-chip">
+                <input
+                  type="checkbox"
+                  name="riskControlGroupIds"
+                  value="<%= group.id %>"
+                  lay-ignore="1"
+                  class="risk-group-checkbox"
+                  <%= selectedSet.has(group.id) ? 'checked' : '' %>
+                />
                 <span><%= group.name %> <small>(<%= group.groupKey %>)</small></span>
               </label>
             <% }) %>
@@ -67,9 +77,11 @@
         <hr style="grid-column: 1 / -1; border: 0; border-top: 1px solid #e5e7eb; margin: 4px 0;" />
         <h3 style="grid-column: 1 / -1;">L1 Moderation</h3>
 
-        <input type="hidden" name="riskControlL1Enabled" value="0" />
-        <label class="checkline"><input name="riskControlL1Enabled" value="on" type="checkbox" <%= riskCfg.l1.enabled ? 'checked' : '' %> /> 启用 L1</label>
-        <span></span>
+        <label class="checkline native-switchline">
+          <input type="hidden" name="riskControlL1Enabled" value="<%= riskCfg.l1.enabled ? '1' : '0' %>" data-switch-hidden="1" />
+          <input value="1" type="checkbox" class="native-switch" lay-ignore="1" data-switch-proxy="riskControlL1Enabled" <%= riskCfg.l1.enabled ? 'checked' : '' %> />
+          <span>启用 L1</span>
+        </label>
 
         <label>L1 Base URL</label>
         <input name="riskControlL1BaseUrl" value="<%= settings.riskControlL1BaseUrl || 'https://api.openai.com' %>" />
@@ -89,9 +101,11 @@
         <hr style="grid-column: 1 / -1; border: 0; border-top: 1px solid #e5e7eb; margin: 4px 0;" />
         <h3 style="grid-column: 1 / -1;">L2 复查（OpenAI兼容）</h3>
 
-        <input type="hidden" name="riskControlL2Enabled" value="0" />
-        <label class="checkline"><input name="riskControlL2Enabled" value="on" type="checkbox" <%= riskCfg.l2.enabled ? 'checked' : '' %> /> 启用 L2</label>
-        <span></span>
+        <label class="checkline native-switchline">
+          <input type="hidden" name="riskControlL2Enabled" value="<%= riskCfg.l2.enabled ? '1' : '0' %>" data-switch-hidden="1" />
+          <input value="1" type="checkbox" class="native-switch" lay-ignore="1" data-switch-proxy="riskControlL2Enabled" <%= riskCfg.l2.enabled ? 'checked' : '' %> />
+          <span>启用 L2</span>
+        </label>
 
         <label>L2 Base URL</label>
         <input name="riskControlL2BaseUrl" value="<%= settings.riskControlL2BaseUrl || 'https://api.openai.com' %>" />
@@ -113,6 +127,7 @@
 
         <label style="grid-column: 1 / -1;">L2 自定义 Prompt（必须输出JSON，建议含 risk/reason/score）</label>
         <textarea style="grid-column: 1 / -1;" name="riskControlL2Prompt" rows="6"><%= settings.riskControlL2Prompt || 'You are a strict safety reviewer. Return JSON only: {"risk":"allow|block","reason":"...","score":0.0}.' %></textarea>
+        <div class="muted" style="grid-column: 1 / -1;">留空时会恢复默认审查 Prompt。</div>
 
         <button type="submit">保存审查设置</button>
       </form>
@@ -139,6 +154,11 @@
 
     <section class="card">
       <h2>最近审查日志</h2>
+      <div class="actions risk-log-actions">
+        <form method="post" action="/admin/risk-control/logs/clear" onsubmit="return confirm('确认清空所有审查日志？此操作不可恢复。')">
+          <button class="danger" type="submit">清空日志</button>
+        </form>
+      </div>
       <div class="table-wrap">
         <table>
           <thead>
@@ -190,5 +210,36 @@
         </table>
       </div>
     </section>
+    <script>
+      document.addEventListener('DOMContentLoaded', function () {
+        const form = document.querySelector('.risk-control-form[data-native-switch-form="1"]');
+        if (!form) {
+          return;
+        }
+
+        function syncSwitch(checkbox) {
+          const fieldName = checkbox.getAttribute('data-switch-proxy');
+          if (!fieldName) {
+            return;
+          }
+          const hidden = form.querySelector('input[type="hidden"][name="' + fieldName + '"][data-switch-hidden="1"]');
+          if (!hidden) {
+            return;
+          }
+          hidden.value = checkbox.checked ? '1' : '0';
+        }
+
+        form.querySelectorAll('.native-switch[data-switch-proxy]').forEach(function (checkbox) {
+          syncSwitch(checkbox);
+          checkbox.addEventListener('change', function () {
+            syncSwitch(checkbox);
+          });
+        });
+
+        form.addEventListener('submit', function () {
+          form.querySelectorAll('.native-switch[data-switch-proxy]').forEach(syncSwitch);
+        });
+      });
+    </script>
   </body>
 </html>

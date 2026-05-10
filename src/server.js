@@ -136,15 +136,16 @@ function parseCheckboxLike(value) {
   };
 
   if (Array.isArray(value)) {
-    let resolved = false;
     for (const item of value) {
       const token = normalizeCheckboxToken(item);
       if (token === null) {
         continue;
       }
-      resolved = token;
+      if (token === true) {
+        return true;
+      }
     }
-    return resolved === true;
+    return false;
   }
   return normalizeCheckboxToken(value) === true;
 }
@@ -189,6 +190,14 @@ function formatMinor(value, currency) {
   const upper = String(currency || 'USD').toUpperCase();
   const factor = upper === 'JPY' ? 1 : 100;
   return (safeNumber(value, 0) / factor).toFixed(factor === 1 ? 0 : 2);
+}
+
+function normalizeGroupKeyInput(value = '') {
+  const text = String(value || '').trim();
+  if (!text) {
+    return '';
+  }
+  return text.replace(/[^a-zA-Z0-9._-]/g, '_').replace(/_+/g, '_').slice(0, 120);
 }
 
 function splitDuration(ms, defaultUnit = 'hour', defaultValue = 1) {
@@ -716,7 +725,6 @@ function buildUpstreamUrl(baseUrl, requestUrl) {
 
 const {
   buildResponsesCompatTargetUrl,
-  normalizeServiceBaseUrl,
   extractSessionRoutingId,
   extractPreviousResponseId,
   extractCodexTurnState,
@@ -736,38 +744,6 @@ const {
   isStreamingRequest,
   ensureStringContent
 } = compat;
-
-function extractPromptCacheKey(jsonBody) {
-  if (!jsonBody || typeof jsonBody !== 'object') {
-    return '';
-  }
-  const candidates = [
-    jsonBody.prompt_cache_key,
-    jsonBody.metadata?.prompt_cache_key,
-    jsonBody.conversation_id,
-    jsonBody.conversationId,
-    jsonBody.metadata?.conversation_id,
-    jsonBody.metadata?.conversationId
-  ];
-  for (const value of candidates) {
-    const key = String(value || '').trim();
-    if (key) {
-      return key;
-    }
-  }
-  return '';
-}
-
-function buildPromptCacheStickyKey({ provider, model, promptCacheKey }) {
-  const key = String(promptCacheKey || '').trim();
-  if (!key) {
-    return '';
-  }
-  const providerPart = normalizeStickyPart(provider) || 'openai';
-  const modelPart = normalizeStickyPart(model) || '-';
-  const digest = crypto.createHash('sha256').update(key).digest('hex');
-  return `prompt-cache:${providerPart}:${modelPart}:${digest}`;
-}
 
 function bindResponseContinuationSticky(account, responseId, ttlMs = 0) {
   const stickyKey = buildResponseContinuationStickyKey(responseId);
@@ -817,22 +793,69 @@ function quotaResetAtFromRow(quota) {
   return new Date(quota.windowStartMs + quota.windowMs).toISOString();
 }
 
+function normalizeModelAlias(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\\/_\\s]+/g, '-')
+    .replace(/-+/g, '-');
+}
+
 function canAccountServeModel(accountId, upstreamModel, accountModelIndex = null) {
   if (!upstreamModel) {
     return true;
   }
+  const normalizedTarget = normalizeModelAlias(upstreamModel);
   if (accountModelIndex && accountModelIndex.has(accountId)) {
     const modelSet = accountModelIndex.get(accountId);
     if (!modelSet || modelSet.size === 0) {
       return true;
     }
-    return modelSet.has(upstreamModel);
+    if (modelSet.has(upstreamModel)) {
+      return true;
+    }
+    for (const modelName of modelSet) {
+      if (normalizeModelAlias(modelName) === normalizedTarget) {
+        return true;
+      }
+    }
+    return false;
   }
   const models = store.listAccountModels(accountId);
   if (!models.length) {
     return true;
   }
-  return models.some((item) => item.modelName === upstreamModel);
+  return models.some((item) => (
+    item.modelName === upstreamModel ||
+    normalizeModelAlias(item.modelName) === normalizedTarget
+  ));
+}
+
+function isResponsesCompatEnforcedForRoute({ groupKey = '', upstreamModel = '' } = {}) {
+  const scopedAccounts = groupKey
+    ? store.listAccountsByGroupKey(groupKey)
+    : store.listAccounts();
+  const accountModelIndex = upstreamModel
+    ? store.listAccountModelsForAccounts(scopedAccounts.map((item) => item.id))
+    : null;
+  let matchedOpenAi = 0;
+  let matchedCompat = 0;
+  for (const account of scopedAccounts) {
+    if (!account || !account.enabled || !account.apiKey) {
+      continue;
+    }
+    if (normalizeProviderName(account.provider) !== 'openai') {
+      continue;
+    }
+    if (!canAccountServeModel(account.id, upstreamModel, accountModelIndex)) {
+      continue;
+    }
+    matchedOpenAi += 1;
+    if (account.forceResponsesCompat === true) {
+      matchedCompat += 1;
+    }
+  }
+  return matchedOpenAi > 0 && matchedCompat === matchedOpenAi;
 }
 
 function parseModelNamesInput(text) {
@@ -1212,137 +1235,6 @@ async function syncModelPricesFromModelsDev(providerId = 'openai', currency = 'U
   return prices.length;
 }
 
-function getPromptCacheConfigForGroupKey(groupKey) {
-  const key = String(groupKey || '').trim();
-  if (!key) {
-    return null;
-  }
-  const group = store.getGroupByKey(key);
-  if (!group || group.enabled !== true || group.cacheEnabled !== true) {
-    return null;
-  }
-  const baseUrl = normalizeServiceBaseUrl(group.cacheBaseUrl);
-  if (!baseUrl) {
-    return null;
-  }
-  return {
-    groupId: group.id,
-    groupName: group.name,
-    groupKey: group.groupKey,
-    baseUrl,
-    authToken: String(group.cacheAuthToken || '').trim()
-  };
-}
-
-function isPromptCacheCandidateRequest(req) {
-  const method = String(req.method || '').toUpperCase();
-  const path = String(req.path || '');
-  if (method !== 'POST') {
-    return false;
-  }
-  return (
-    path === '/v1/chat/completions' ||
-    path === '/v1/responses' ||
-    path === '/v1/responses/compact' ||
-    path === '/v1/messages'
-  );
-}
-
-function getPromptCacheTargetUrl(baseUrl) {
-  return buildUpstreamUrl(baseUrl, '/v1/chat/completions');
-}
-
-function mapPromptCacheStats(rawStats) {
-  const stats = rawStats && typeof rawStats === 'object' ? rawStats : {};
-  const hits = firstFiniteNumber([
-    stats.hits,
-    stats.cache_hits,
-    stats.cacheHits,
-    stats.hit_count
-  ], 0);
-  const misses = firstFiniteNumber([
-    stats.misses,
-    stats.cache_misses,
-    stats.cacheMisses,
-    stats.miss_count
-  ], 0);
-  const total = Math.max(hits + misses, 0);
-  const hitRate = total > 0 ? (hits / total) : 0;
-  return {
-    hits,
-    misses,
-    total,
-    hitRate,
-    raw: stats
-  };
-}
-
-async function fetchPromptCacheGroupRuntime(group) {
-  const baseUrl = normalizeServiceBaseUrl(group.cacheBaseUrl);
-  const authToken = String(group.cacheAuthToken || '').trim();
-  if (!group.cacheEnabled || !baseUrl) {
-    return {
-      groupId: group.id,
-      groupName: group.name,
-      groupKey: group.groupKey,
-      enabled: group.cacheEnabled === true,
-      baseUrl,
-      healthy: false,
-      healthDetail: group.cacheEnabled ? 'Invalid cache base URL' : 'Disabled',
-      stats: mapPromptCacheStats({})
-    };
-  }
-
-  const headers = {
-    Accept: 'application/json',
-    'Accept-Encoding': 'identity'
-  };
-  if (authToken) {
-    headers.Authorization = `Bearer ${authToken}`;
-  }
-
-  let healthy = false;
-  let healthDetail = '';
-  let stats = mapPromptCacheStats({});
-  try {
-    const healthUrl = buildUpstreamUrl(baseUrl, '/health');
-    const healthResp = await fetch(healthUrl, { method: 'GET', headers });
-    healthy = healthResp.ok;
-    if (!healthResp.ok) {
-      healthDetail = `health status ${healthResp.status}`;
-    }
-  } catch (error) {
-    healthy = false;
-    healthDetail = error?.message || 'health check failed';
-  }
-
-  try {
-    const statsUrl = buildUpstreamUrl(baseUrl, '/v1/stats');
-    const statsResp = await fetch(statsUrl, { method: 'GET', headers });
-    if (statsResp.ok) {
-      const payload = await statsResp.json();
-      stats = mapPromptCacheStats(payload);
-    } else if (!healthDetail) {
-      healthDetail = `stats status ${statsResp.status}`;
-    }
-  } catch (error) {
-    if (!healthDetail) {
-      healthDetail = error?.message || 'stats fetch failed';
-    }
-  }
-
-  return {
-    groupId: group.id,
-    groupName: group.name,
-    groupKey: group.groupKey,
-    enabled: group.cacheEnabled === true,
-    baseUrl,
-    healthy,
-    healthDetail,
-    stats
-  };
-}
-
 await migrateJsonConfigIfNeeded();
 ensureAdminPasswordSeed();
 hydrateRequestLogsFromStore();
@@ -1357,7 +1249,7 @@ app.get('/', (req, res) => {
   res.redirect('/admin');
 });
 
-app.use('/admin', express.urlencoded({ extended: false }));
+app.use('/admin', express.urlencoded({ extended: true }));
 
 app.get('/admin/login', (req, res) => {
   cleanupAdminSessions();
@@ -1797,56 +1689,6 @@ app.get('/admin/logs', adminOnly, (req, res) => {
   });
 });
 
-app.get('/admin/cache', adminOnly, async (req, res) => {
-  const { accounts } = loadAccountPageData();
-  const groups = store.listGroups();
-  const cacheGroups = groups.filter((group) => group.cacheEnabled === true);
-  const runtimes = [];
-  for (const group of cacheGroups) {
-    // eslint-disable-next-line no-await-in-loop
-    runtimes.push(await fetchPromptCacheGroupRuntime(group));
-  }
-  const totalHits = runtimes.reduce((sum, item) => sum + item.stats.hits, 0);
-  const totalMisses = runtimes.reduce((sum, item) => sum + item.stats.misses, 0);
-  const totalRequests = totalHits + totalMisses;
-  const totalHitRate = totalRequests > 0 ? (totalHits / totalRequests) : 0;
-  const cacheRuntimeCharts = {
-    groupNames: runtimes.map((item) => item.groupName || item.groupKey || '-'),
-    groupHitRates: runtimes.map((item) => Number(((item.stats.hitRate || 0) * 100).toFixed(2))),
-    groupHits: runtimes.map((item) => Math.max(Number(item.stats.hits || 0), 0)),
-    groupMisses: runtimes.map((item) => Math.max(Number(item.stats.misses || 0), 0)),
-    healthSeries: [
-      {
-        name: '健康',
-        value: runtimes.filter((item) => item.healthy).length
-      },
-      {
-        name: '异常',
-        value: runtimes.filter((item) => !item.healthy).length
-      }
-    ],
-    requestSeries: [
-      { name: '命中', value: totalHits },
-      { name: '未命中', value: totalMisses }
-    ]
-  };
-  res.render('admin-cache', {
-    activePage: 'cache',
-    settings,
-    stats: buildAdminStats(accounts),
-    notice: req.query.notice || '',
-    runtimes,
-    charts: cacheRuntimeCharts,
-    summary: {
-      enabledGroups: cacheGroups.length,
-      totalHits,
-      totalMisses,
-      totalRequests,
-      totalHitRate
-    }
-  });
-});
-
 app.get('/admin/risk-control', adminOnly, (req, res) => {
   const { accounts } = loadAccountPageData();
   const groups = store.listGroups();
@@ -1885,6 +1727,11 @@ app.get('/admin/risk-control', adminOnly, (req, res) => {
     logs,
     selectedGroupIds
   });
+});
+
+app.post('/admin/risk-control/logs/clear', adminOnly, (req, res) => {
+  store.clearRiskControlLogs();
+  return adminNoticeRedirect(req, res, '审查日志已清空', '/admin/risk-control');
 });
 
 app.get('/admin/logs/stream', adminOnly, (req, res) => {
@@ -2372,28 +2219,19 @@ app.post('/admin/prices/delete', adminOnly, (req, res) => {
 
 app.post('/admin/groups', adminOnly, (req, res) => {
   const name = String(req.body.name || '').trim();
-  const groupKey = String(req.body.groupKey || '').trim();
+  const groupKey = normalizeGroupKeyInput(req.body.groupKey);
   const description = String(req.body.description || '').trim();
-  const cacheEnabled = parseCheckboxLike(req.body.cacheEnabled);
-  const cacheBaseUrl = normalizeServiceBaseUrl(req.body.cacheBaseUrl || '');
-  const cacheAuthToken = String(req.body.cacheAuthToken || '').trim();
   if (!name || !groupKey) {
     return adminNoticeRedirect(req, res, 'Group name and group key required', '/admin/groups');
   }
   if (store.getGroupByKey(groupKey)) {
     return adminNoticeRedirect(req, res, 'Group key already exists', '/admin/groups');
   }
-  if (cacheEnabled && !cacheBaseUrl) {
-    return adminNoticeRedirect(req, res, 'Cache enabled but cache base URL is invalid', '/admin/groups');
-  }
   store.createGroup({
     id: crypto.randomUUID(),
     name,
     groupKey,
     description,
-    cacheEnabled,
-    cacheBaseUrl,
-    cacheAuthToken,
     enabled: parseCheckboxLike(req.body.enabled),
     createdAt: new Date().toISOString()
   });
@@ -2406,11 +2244,8 @@ app.post('/admin/groups/:id/update', adminOnly, (req, res) => {
     return adminNoticeRedirect(req, res, 'Group not found', '/admin/groups');
   }
   const name = String(req.body.name || '').trim();
-  const groupKey = String(req.body.groupKey || '').trim();
+  const groupKey = normalizeGroupKeyInput(req.body.groupKey);
   const description = String(req.body.description || '').trim();
-  const cacheEnabled = parseCheckboxLike(req.body.cacheEnabled);
-  const cacheBaseUrl = normalizeServiceBaseUrl(req.body.cacheBaseUrl || '');
-  const cacheAuthToken = String(req.body.cacheAuthToken || '').trim();
   if (!name || !groupKey) {
     return adminNoticeRedirect(req, res, 'Group name and group key required', '/admin/groups');
   }
@@ -2418,16 +2253,10 @@ app.post('/admin/groups/:id/update', adminOnly, (req, res) => {
   if (keyOwner && keyOwner.id !== group.id) {
     return adminNoticeRedirect(req, res, 'Group key already exists', '/admin/groups');
   }
-  if (cacheEnabled && !cacheBaseUrl) {
-    return adminNoticeRedirect(req, res, 'Cache enabled but cache base URL is invalid', '/admin/groups');
-  }
   store.updateGroup(group.id, {
     name,
     groupKey,
     description,
-    cacheEnabled,
-    cacheBaseUrl,
-    cacheAuthToken,
     enabled: parseCheckboxLike(req.body.enabled)
   });
   return adminNoticeRedirect(req, res, 'Group updated', '/admin/groups');
@@ -2628,9 +2457,11 @@ app.all('/v1/*', async (req, res) => {
     String(req.headers['user-agent'] || '').toLowerCase().includes('claude')
   );
   const isAnthropicStyleRequest = req.path.startsWith('/v1/messages') || (req.path === '/v1/models' && hasAnthropicHint);
-  const requestProvider = isResponsesPath
-    ? 'openai'
-    : (isAnthropicMessagesCreate || isAnthropicCountTokens || isAnthropicStyleRequest ? 'anthropic' : '');
+  const requestProvider = (
+    isResponsesPath || isChatCompletionsCreate
+      ? 'openai'
+      : (isAnthropicMessagesCreate || isAnthropicCountTokens || isAnthropicStyleRequest ? 'anthropic' : '')
+  );
   const requestedStream = isStreamingRequest({
     supportsStreamField: isResponsesCreate || isAnthropicMessagesCreate,
     jsonBody,
@@ -2689,214 +2520,6 @@ app.all('/v1/*', async (req, res) => {
     ? wantsResponsesReasoningSummary(jsonBody)
     : '';
 
-  const promptCacheConfig = getPromptCacheConfigForGroupKey(requestGroupKey);
-  const canUsePromptCache = Boolean(promptCacheConfig && isPromptCacheCandidateRequest(req));
-  let promptCacheBypassReason = '';
-  if (canUsePromptCache) {
-    let cacheChatBody = null;
-    let cacheResponseMode = '';
-    if (isChatCompletionsCreate) {
-      cacheChatBody = jsonBody && typeof jsonBody === 'object' ? cloneJsonLike(jsonBody, null) : null;
-      cacheResponseMode = 'chat';
-    } else if (isResponsesSessionRequest) {
-      cacheChatBody = responsesCompatChatBody ? cloneJsonLike(responsesCompatChatBody, null) : null;
-      cacheResponseMode = isResponsesCompact ? 'responses_compact' : 'responses';
-    } else if (isAnthropicMessagesCreate) {
-      cacheChatBody = convertAnthropicMessagesRequestToChatRequest(jsonBody);
-      cacheResponseMode = 'anthropic';
-    }
-
-    if (cacheChatBody && cacheChatBody.model) {
-      if (upstreamModel && upstreamModel !== cacheChatBody.model) {
-        cacheChatBody.model = upstreamModel;
-      }
-      const promptCacheTargetUrl = getPromptCacheTargetUrl(promptCacheConfig.baseUrl);
-      const promptCacheHeaders = {
-        accept: requestedStream ? 'text/event-stream' : 'application/json',
-        'accept-encoding': 'identity',
-        'content-type': 'application/json',
-        'user-agent': 'responses-gateway/1.0 (+prompt-cache)'
-      };
-      if (promptCacheConfig.authToken) {
-        promptCacheHeaders.authorization = `Bearer ${promptCacheConfig.authToken}`;
-      }
-      const promptCacheBodyBuffer = Buffer.from(JSON.stringify(cacheChatBody), 'utf8');
-      try {
-        let cacheUpstream = await fetch(promptCacheTargetUrl, {
-          method: 'POST',
-          headers: promptCacheHeaders,
-          body: promptCacheBodyBuffer,
-          duplex: 'half',
-          redirect: 'manual'
-        });
-
-        logState.provider = 'promptcache';
-        logState.accountName = `promptcache:${promptCacheConfig.groupName}`;
-
-        res.status(cacheUpstream.status);
-        cacheUpstream.headers.forEach((value, key) => {
-          const lower = key.toLowerCase();
-          if (
-            lower === 'transfer-encoding' ||
-            lower === 'content-encoding' ||
-            lower === 'content-length' ||
-            lower === 'connection' ||
-            lower === 'keep-alive'
-          ) {
-            return;
-          }
-          res.setHeader(key, value);
-        });
-        res.setHeader('x-gateway-cache-proxy', 'promptcache');
-        res.setHeader('x-gateway-account', `promptcache:${promptCacheConfig.groupName}`);
-        res.setHeader('x-gateway-sticky-hit', 'false');
-        if (requestModel && upstreamModel && requestModel !== upstreamModel) {
-          res.setHeader('x-gateway-model-mapped', `${requestModel}->${upstreamModel}`);
-        }
-
-        const contentType = String(cacheUpstream.headers.get('content-type') || '').toLowerCase();
-        const streamLikeContentType = (
-          contentType.includes('text/event-stream') ||
-          contentType.includes('application/x-ndjson') ||
-          contentType.includes('application/stream+json')
-        );
-        const shouldPipeStream = streamLikeContentType || (requestedStream && cacheUpstream.ok);
-
-        if (!shouldPipeStream) {
-          const responseBuffer = Buffer.from(await cacheUpstream.arrayBuffer());
-          const responseText = responseBuffer.toString('utf8');
-          const payload = safeJsonParse(responseText);
-          const usage = payload ? extractUsageFromPayload(payload) : null;
-          const outputTokens = usage?.output || 0;
-          const inputTokens = usage?.input || 0;
-          const cachedTokens = usage?.cached || 0;
-          const totalTokens = usage?.total || (inputTokens + outputTokens);
-
-          let outgoingResponseBuffer = responseBuffer;
-          if (cacheUpstream.ok && payload && typeof payload === 'object') {
-            if (cacheResponseMode === 'responses') {
-              const compatPayload = convertChatCompletionToResponsesPayload(payload, {
-                includeReasoningSummary: Boolean(responsesCompatReasoningSummaryMode)
-              });
-              outgoingResponseBuffer = Buffer.from(JSON.stringify(compatPayload), 'utf8');
-              res.setHeader('content-type', 'application/json; charset=utf-8');
-            } else if (cacheResponseMode === 'responses_compact') {
-              const compatPayload = convertChatCompletionToResponsesPayload(payload, {
-                includeReasoningSummary: Boolean(responsesCompatReasoningSummaryMode)
-              });
-              outgoingResponseBuffer = Buffer.from(JSON.stringify({ output: compatPayload.output || [] }), 'utf8');
-              res.setHeader('content-type', 'application/json; charset=utf-8');
-            } else if (cacheResponseMode === 'anthropic') {
-              const anthropicPayload = convertChatCompletionToAnthropicResponsePayload(payload, requestModel || upstreamModel || '');
-              outgoingResponseBuffer = Buffer.from(JSON.stringify(anthropicPayload), 'utf8');
-              res.setHeader('content-type', 'application/json; charset=utf-8');
-            }
-          }
-          writeRequestLog({
-            statusCode: cacheUpstream.status,
-            tokens: totalTokens,
-            inputTokens,
-            outputTokens,
-            cachedTokens,
-            costMinor: 0,
-            errorDetail: cacheUpstream.ok ? '' : extractErrorDetail(payload, responseText)
-          });
-          res.setHeader('content-length', String(outgoingResponseBuffer.byteLength));
-          res.end(outgoingResponseBuffer);
-          return;
-        }
-
-        if (!cacheUpstream.body) {
-          writeRequestLog({
-            statusCode: cacheUpstream.status,
-            errorDetail: `PromptCache returned empty body (${cacheUpstream.status})`
-          });
-          res.end();
-          return;
-        }
-
-        const sourceStream = Readable.fromWeb(cacheUpstream.body);
-        let outgoingStream = sourceStream;
-        if (cacheResponseMode === 'responses') {
-          const compatResponseId = generateCompatResponseId();
-          const compatTransform = createChatCompletionsToResponsesSseTransform({
-            responseId: compatResponseId,
-            model: upstreamModel || requestModel || '',
-            includeReasoningSummary: Boolean(responsesCompatReasoningSummaryMode)
-          });
-          res.setHeader('content-type', 'text/event-stream; charset=utf-8');
-          res.setHeader('cache-control', 'no-cache, no-transform');
-          outgoingStream = sourceStream.pipe(compatTransform.transformer);
-        } else if (cacheResponseMode === 'responses_compact') {
-          const compatResponseId = generateCompatResponseId();
-          const compatTransform = createChatCompletionsToResponsesSseTransform({
-            responseId: compatResponseId,
-            model: upstreamModel || requestModel || '',
-            includeReasoningSummary: Boolean(responsesCompatReasoningSummaryMode)
-          });
-          res.setHeader('content-type', 'text/event-stream; charset=utf-8');
-          res.setHeader('cache-control', 'no-cache, no-transform');
-          outgoingStream = sourceStream.pipe(compatTransform.transformer);
-        } else if (cacheResponseMode === 'anthropic') {
-          const anthropicTransform = createChatCompletionsToAnthropicSseTransform({
-            messageId: `msg_${crypto.randomUUID()}`,
-            model: requestModel || upstreamModel || ''
-          });
-          res.setHeader('content-type', 'text/event-stream; charset=utf-8');
-          res.setHeader('cache-control', 'no-cache, no-transform');
-          outgoingStream = sourceStream.pipe(anthropicTransform.transformer);
-        }
-
-        let streamUsage = null;
-        let streamErrorDetail = '';
-        let usageFlushed = false;
-        const usageObserver = createStreamUsageObserver(
-          String(res.getHeader('content-type') || cacheUpstream.headers.get('content-type') || '').toLowerCase(),
-          {
-            onPayload: (payload) => {
-              if (!streamErrorDetail && payload && typeof payload === 'object') {
-                streamErrorDetail = extractErrorDetail(payload, '');
-              }
-            },
-            onUsage: (usage) => {
-              if (!usage) {
-                return;
-              }
-              if (!streamUsage || usage.total >= streamUsage.total) {
-                streamUsage = usage;
-              }
-            }
-          }
-        );
-        const flushStreamUsage = () => {
-          if (usageFlushed) {
-            return;
-          }
-          usageFlushed = true;
-          writeRequestLog({
-            statusCode: cacheUpstream.status,
-            tokens: streamUsage?.total || 0,
-            inputTokens: streamUsage?.input || 0,
-            outputTokens: streamUsage?.output || 0,
-            cachedTokens: streamUsage?.cached || 0,
-            costMinor: 0,
-            errorDetail: cacheUpstream.ok ? '' : streamErrorDetail
-          });
-        };
-        usageObserver.on('end', flushStreamUsage);
-        res.once('finish', flushStreamUsage);
-        res.flushHeaders();
-        outgoingStream.pipe(usageObserver).pipe(res);
-        return;
-      } catch (error) {
-        promptCacheBypassReason = sanitizeLogText(
-          `PromptCache bypass: ${error?.message || 'unknown error'}`,
-          220
-        );
-      }
-    }
-  }
-
   let stickyKey = '';
   let stickySeed = crypto.randomUUID();
   if ((isResponsesSessionRequest || isAnthropicMessagesCreate) && jsonBody && typeof jsonBody === 'object') {
@@ -2910,13 +2533,7 @@ app.all('/v1/*', async (req, res) => {
         turnState: codexTurnState
       });
       const previousResponseStickyKey = buildResponseContinuationStickyKey(previousResponseId);
-      const promptCacheKey = extractPromptCacheKey(jsonBody);
-      const promptCacheStickyKey = buildPromptCacheStickyKey({
-        provider: requestProvider || 'openai',
-        model: requestModel || upstreamModel || '',
-        promptCacheKey
-      });
-      const codexAffinityStickyKey = (!codexTurnStickyKey && !sessionRoutingId && !promptCacheStickyKey && isLikelyCodexRequest(req, jsonBody))
+      const codexAffinityStickyKey = (!codexTurnStickyKey && !sessionRoutingId && isLikelyCodexRequest(req, jsonBody))
         ? buildCodexAffinityStickyKey({
           provider: requestProvider || 'openai',
           model: requestModel || upstreamModel || '',
@@ -2931,7 +2548,7 @@ app.all('/v1/*', async (req, res) => {
           ? previousResponseStickyKey
           : (sessionRoutingId
             ? `session:${requestProvider || 'openai'}:${sessionRoutingId}`
-            : (promptCacheStickyKey || codexAffinityStickyKey || buildStickyKey(req.method, req.path, buildDeterministicRoutingBody(jsonBody), req.query))));
+            : (codexAffinityStickyKey || buildStickyKey(req.method, req.path, buildDeterministicRoutingBody(jsonBody), req.query))));
     } else if (sessionRoutingId) {
       stickyKey = `session:${requestProvider || 'anthropic'}:${sessionRoutingId}`;
     }
@@ -2953,11 +2570,7 @@ app.all('/v1/*', async (req, res) => {
   if (selection.error || !selection.account) {
     writeRequestLog({
       statusCode: 429,
-      errorDetail: (
-        promptCacheBypassReason
-          ? `${selection.error || 'No account available'} | ${promptCacheBypassReason}`
-          : (selection.error || 'No account available')
-      )
+      errorDetail: selection.error || 'No account available'
     });
     res.status(429).json({ error: selection.error || 'No account available' });
     return;
@@ -2968,7 +2581,7 @@ app.all('/v1/*', async (req, res) => {
   const maxAttemptCount = 3;
   let attemptCount = 1;
   let switchCount = 0;
-  let lastRetryReason = promptCacheBypassReason;
+  let lastRetryReason = '';
   let activeCompatUnsupportedFields = [];
   const excludedAccounts = new Set();
   const writeAttemptLog = (payload) => {
@@ -3134,10 +2747,6 @@ app.all('/v1/*', async (req, res) => {
     }
     if (requestModel && upstreamModel && requestModel !== upstreamModel) {
       res.setHeader('x-gateway-model-mapped', `${requestModel}->${upstreamModel}`);
-    }
-    if (promptCacheBypassReason) {
-      res.setHeader('x-gateway-cache-proxy', 'bypass');
-      res.setHeader('x-gateway-cache-bypass', promptCacheBypassReason);
     }
   };
 

@@ -800,6 +800,7 @@ export function createStore(dbPath) {
       LIMIT -1 OFFSET ?
     )
   `);
+  const clearRiskControlLogsStmt = db.prepare('DELETE FROM risk_control_logs');
 
   for (const [key, value] of Object.entries(defaultSettings)) {
     upsertSettingStmt.run(key, String(value));
@@ -1529,6 +1530,10 @@ export function createStore(dbPath) {
     trimRiskControlLogsStmt.run(safeMax);
   }
 
+  function clearRiskControlLogs() {
+    clearRiskControlLogsStmt.run();
+  }
+
 	function listGroups() {
 	  return listGroupsStmt.all().map((row) => ({
 	    id: row.id,
@@ -1690,6 +1695,7 @@ export function createStore(dbPath) {
     appendRiskControlLog,
     listRecentRiskControlLogs,
     trimRiskControlLogs,
+    clearRiskControlLogs,
     close
   };
 }
