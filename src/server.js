@@ -414,6 +414,14 @@ function normalizeProviderName(provider) {
   return String(provider || 'openai').trim().toLowerCase() === 'anthropic' ? 'anthropic' : 'openai';
 }
 
+function normalizeDebugAutoMode(value) {
+  const mode = String(value || '').trim().toLowerCase();
+  if (mode === 'on' || mode === 'codex' || mode === 'off') {
+    return mode;
+  }
+  return 'off';
+}
+
 function classifyUpstreamRetry(statusCode, payload, fallbackText = '') {
   const status = Number(statusCode) || 0;
   const detail = extractErrorDetail(payload, fallbackText).toLowerCase();
@@ -1870,6 +1878,7 @@ app.post('/admin/settings', adminOnly, (req, res) => {
   const stickyMs = parseDurationMs(req.body.globalStickyValue, req.body.globalStickyUnit);
   const sessionMs = parseDurationMs(req.body.sessionTtlValue, req.body.sessionTtlUnit);
   const defaultCurrency = String(req.body.defaultCurrency || '').trim().toUpperCase();
+  const debugAutoMode = normalizeDebugAutoMode(req.body.debugAutoMode);
 
   const nextSettings = {};
   if (stickyMs > 0) {
@@ -1885,6 +1894,7 @@ app.post('/admin/settings', adminOnly, (req, res) => {
   if (defaultCurrency) {
     nextSettings.defaultCurrency = defaultCurrency;
   }
+  nextSettings.debugAutoMode = debugAutoMode;
 
   if (Object.keys(nextSettings).length > 0) {
     store.updateSettings(nextSettings);
